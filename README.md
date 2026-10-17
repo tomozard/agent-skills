@@ -6,7 +6,7 @@ A curated collection of AI Agent skills and architectural workflows for coding a
 
 | Skill | Description | Direct Install Command |
 | :--- | :--- | :--- |
-| `backend-design-patterns` | Guide and evaluate backend architecture using 10 proven backend patterns | `npx skills add tomozard/agent-skills/skills/backend-design-patterns` |
+| `fullstack-design-patterns` | Guide, evaluate, and architect fullstack applications covering modern Frontend UI component design, state management, and robust Backend architecture. | `npx skills add tomozard/agent-skills/skills/fullstack-design-patterns` |
 
 ## Installation
 
