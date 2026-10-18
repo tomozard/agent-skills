@@ -1,0 +1,4 @@
+interface:
+  display_name: "Blender Plan from Images"
+  short_description: "Trace floor plans into Blender and verify room layouts"
+  default_prompt: "Use $blender-plan-from-images to build or correct a Blender model from my floor-plan images, checking each room and overlaying the result on the references."
