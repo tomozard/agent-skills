@@ -32,18 +32,16 @@ spawn a process and send a message.
 
 ## Flow
 
-```
-intake.json ──► workflow-shape ──► shape + staff + verifiers + tier
-                                        │
-                                        ▼
-                          scope lock (Allowed files, Required behavior)
-                                        │
-                     worker edits ──► freeze staged diff (SHA-256)
-                                        │
-                     verifier(s) PASS that exact hash ──► revision budget 2
-                                        │
-                       Human token ──► commit ─► push ─► PR
-```
+| Step | Owner | Output |
+|---|---|---|
+| 1. Intake | PM | one intake file describing the task: class, behavior change, risk, workstreams |
+| 2. Resolve | `workflow-shape` | shape, staff, verifiers, tier, and why larger shapes were rejected |
+| 3. Lock scope | PM | `Allowed files`, `Required behavior`, `Forbidden scope`, work branch |
+| 4. Execute | worker | edits inside the allowed files only |
+| 5. Freeze | worker | the staged diff frozen as a SHA-256 plus a readable artifact |
+| 6. Verify | verifier(s) | PASS on that exact hash, with a revision budget of two |
+| 7. Commit | worker, after the Human token | one commit whose diff is compared mechanically to the verified hash |
+| 8. Deliver | worker or controller | push and PR only on exact Human authorization |
 
 The freeze-verify-commit step is the reason this exists: a commit is allowed
 only for a diff hash that an independent verifier already passed, and any change
