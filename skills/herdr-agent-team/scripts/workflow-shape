@@ -1,0 +1,738 @@
+#!/usr/bin/env python3
+"""Deterministic workflow-shape resolver for the Herdr agent team.
+
+PM owns adaptive staffing (AGENTS.md -> Adaptive Staffing). That policy is
+prose, so the same intake can be staffed two different ways on two different
+days. This resolver is the executable mirror of the policy: PM hands it a
+structured intake, it returns one shape, the staff for that shape, the
+verification gates, and the reasons every larger shape was rejected.
+
+It never performs work, never spawns panes, and never writes files. It is a
+pure function of (intake, team.json).
+
+Usage:
+  workflow-shape --intake intake.json          # or: --intake - < intake.json
+  workflow-shape --intake - --format text
+  workflow-shape --list
+  workflow-shape --explain W4-fix-test
+
+Exit codes: 0 resolved, 2 invalid intake, 3 unusable team.json.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+SHAPES = {
+    "W0-answer": {
+        "task_classes": ["advisory"],
+        "summary": "Answer or assess with no repository write.",
+        "staff": [],
+        "verifiers": [],
+        "gates": ["scope-lock"],
+    },
+    "W1-doc": {
+        "task_classes": ["document"],
+        "summary": "Write or update approved Markdown/text/note files.",
+        "staff": ["documenter"],
+        "verifiers": [],
+        "gates": ["scope-lock", "allowed-files", "diff-scope-review"],
+    },
+    "W2-micro": {
+        "task_classes": ["bug-fix"],
+        "summary": "Deterministic micro change proven by a numeric/text-only diff.",
+        "staff": ["coder"],
+        "verifiers": [],
+        "gates": ["scope-lock", "allowed-files", "deterministic-micro-proof",
+                  "diff-scope-review", "verification-gate"],
+    },
+    "W3-fix": {
+        "task_classes": ["bug-fix"],
+        "summary": "Known-cause behavior fix with non-runnable acceptance.",
+        "staff": ["coder"],
+        "verifiers": ["reviewer"],
+        "gates": ["scope-lock", "allowed-files", "diff-scope-review",
+                  "verification-gate"],
+    },
+    "W4-fix-test": {
+        "task_classes": ["bug-fix"],
+        "summary": "Known-cause behavior fix with runnable acceptance.",
+        "staff": ["coder"],
+        "verifiers": ["tester"],
+        "gates": ["scope-lock", "allowed-files", "test-pass", "diff-scope-review",
+                  "verification-gate"],
+    },
+    "W5-refactor": {
+        "task_classes": ["refactor"],
+        "summary": "Approved structural cleanup with no behavior change.",
+        "staff": ["refactor"],
+        "verifiers": ["reviewer"],
+        "gates": ["scope-lock", "allowed-files", "diff-scope-review",
+                  "verification-gate"],
+    },
+    "W6-fix-refactor": {
+        "task_classes": ["bug-fix", "refactor"],
+        "summary": "Behavior fix whose root cause is structural; both approved.",
+        "staff": ["coder", "refactor"],
+        "verifiers": ["reviewer", "tester"],
+        "gates": ["scope-lock", "allowed-files", "serial-writers", "test-pass",
+                  "diff-scope-review", "verification-gate"],
+    },
+    "W7-feature": {
+        "task_classes": ["feature"],
+        "summary": "New behavior; specification before code.",
+        "staff": ["sa", "coder"],
+        "verifiers": ["reviewer", "tester"],
+        "gates": ["scope-lock", "allowed-files", "spec-accepted", "test-pass",
+                  "diff-scope-review", "verification-gate"],
+    },
+    "W8-investigate": {
+        "task_classes": ["investigation"],
+        "summary": "Read-only discovery to establish cause, scope, or facts.",
+        "staff": ["investigator"],
+        "verifiers": [],
+        "gates": ["scope-lock", "read-only", "root-cause-report"],
+    },
+    "W9-ops": {
+        "task_classes": ["operational"],
+        "summary": "Bounded operational change with no source behavior change.",
+        "staff": ["coder"],
+        "verifiers": ["reviewer"],
+        "gates": ["scope-lock", "allowed-files", "diff-scope-review"],
+    },
+    "W10-deliver": {
+        "task_classes": ["delivery"],
+        "summary": "Commit/push/PR of an already verified increment.",
+        "staff": [],
+        "verifiers": [],
+        "gates": ["verification-gate", "human-delivery-token"],
+    },
+}
+
+RISK_LEVELS = ("low", "medium", "high")
+TIER_ORDER = ("standard", "critical")
+INTAKE_FIELDS = {
+    "task_class": str,
+    "request": str,
+    "touches_behavior": bool,
+    "known_cause": bool,
+    "runnable_acceptance": bool,
+    "new_behavior": bool,
+    "structural_cleanup": bool,
+    "micro_deterministic": bool,
+    "ui_change": bool,
+    "external_facts_needed": bool,
+    "policy_sensitive_doc": bool,
+    "needs_remote_delivery": bool,
+    "independent_workstreams": int,
+    "risk": str,
+}
+
+
+def die(message, code=2):
+    sys.stderr.write("workflow-shape: %s\n" % message)
+    raise SystemExit(code)
+
+
+def default_team_path():
+    """Team allowlist to resolve against.
+
+    Order: --team, $TASK_TEAM_FILE, $HERDR_TEAM_FILE, this skill's example file.
+    Copy examples/team.json into your own project and point --team at it.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(os.path.dirname(here), "examples", "team.json")
+
+
+def load_team(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            team = json.load(handle)
+    except OSError as exc:
+        die("cannot read team.json at %s (%s)" % (path, exc), 3)
+    except json.JSONDecodeError as exc:
+        die("team.json is not valid JSON (%s)" % exc, 3)
+    if not isinstance(team.get("roles"), dict):
+        die("team.json has no roles map", 3)
+    return team
+
+
+def normalise_intake(raw):
+    if not isinstance(raw, dict):
+        die("intake must be a JSON object")
+    intake = {}
+    unknown = sorted(set(raw) - set(INTAKE_FIELDS))
+    if unknown:
+        die("unknown intake field(s): %s" % ", ".join(unknown))
+    for field, kind in INTAKE_FIELDS.items():
+        if field not in raw or raw[field] is None:
+            continue
+        value = raw[field]
+        if kind is bool and not isinstance(value, bool):
+            die("intake.%s must be true or false" % field)
+        if kind is int and (isinstance(value, bool) or not isinstance(value, int)):
+            die("intake.%s must be an integer" % field)
+        if kind is str and not isinstance(value, str):
+            die("intake.%s must be a string" % field)
+        intake[field] = value
+
+    risk = intake.setdefault("risk", "low")
+    if risk not in RISK_LEVELS:
+        die("intake.risk must be one of %s" % ", ".join(RISK_LEVELS))
+    streams = intake.setdefault("independent_workstreams", 1)
+    if streams < 1:
+        die("intake.independent_workstreams must be >= 1")
+
+    task_class = intake.get("task_class")
+    if task_class is not None:
+        known = {cls for shape in SHAPES.values() for cls in shape["task_classes"]}
+        if task_class not in known:
+            die("intake.task_class must be one of %s" % ", ".join(sorted(known)))
+    return intake
+
+
+def candidate(shape_id, intake):
+    """Return (matches, reason_when_skipped) for one shape in decision order."""
+    got = intake
+    tc = got.get("task_class")
+    explicit = tc is not None
+
+    def needs(field, value=True):
+        return got.get(field, False) is value
+
+    if shape_id == "W10-deliver":
+        if explicit and tc == "delivery":
+            return True, ""
+        return False, "the request is not a bounded delivery of verified work"
+
+    if shape_id == "W0-answer":
+        if explicit and tc == "advisory":
+            return True, ""
+        return False, "the intake implies a repository write"
+
+    if shape_id == "W1-doc":
+        if explicit and tc == "document":
+            return True, ""
+        return False, "the change is not documentation-only"
+
+    if shape_id == "W8-investigate":
+        if explicit and tc == "investigation":
+            return True, ""
+        if got.get("known_cause") is False:
+            return True, ""
+        return False, "the cause is known or no discovery was requested"
+
+    if shape_id == "W9-ops":
+        if explicit and tc == "operational":
+            return True, ""
+        return False, "the change touches source behavior, so it is not operational"
+
+    if shape_id == "W6-fix-refactor":
+        if needs("structural_cleanup") and needs("touches_behavior"):
+            return True, ""
+        return False, "no approved structural cleanup sits under a behavior change"
+
+    if shape_id == "W5-refactor":
+        if needs("structural_cleanup"):
+            return True, ""
+        return False, "no approved structural cleanup"
+
+    if shape_id == "W7-feature":
+        if explicit and tc == "feature":
+            return True, ""
+        if needs("new_behavior"):
+            return True, ""
+        return False, "no new behavior is being added"
+
+    if shape_id == "W2-micro":
+        if needs("micro_deterministic") and not needs("touches_behavior"):
+            return True, ""
+        return False, "the change is not a proven deterministic micro edit"
+
+    if shape_id == "W4-fix-test":
+        if needs("touches_behavior") and needs("runnable_acceptance"):
+            return True, ""
+        return False, "acceptance is not runnable in this intake"
+
+    if shape_id == "W3-fix":
+        if needs("touches_behavior"):
+            return True, ""
+        return False, "no runtime behavior changes"
+
+    return False, "no rule matched"
+
+
+DECISION_ORDER = [
+    "W10-deliver",
+    "W0-answer",
+    "W1-doc",
+    "W8-investigate",
+    "W9-ops",
+    "W6-fix-refactor",
+    "W5-refactor",
+    "W7-feature",
+    "W2-micro",
+    "W4-fix-test",
+    "W3-fix",
+]
+
+
+def resolve_shape(intake):
+    rejected = []
+    for shape_id in DECISION_ORDER:
+        matched, reason = candidate(shape_id, intake)
+        if matched:
+            return shape_id, rejected
+        rejected.append({"shape": shape_id, "reason": reason})
+    return "W0-answer", rejected
+
+
+def tier_for(intake, shape_id):
+    reasons = []
+    tier = "standard"
+    weight = 0
+    if intake.get("touches_behavior"):
+        weight += 1
+    if intake.get("runnable_acceptance"):
+        weight += 1
+    if intake.get("structural_cleanup"):
+        weight += 3
+    if intake.get("new_behavior"):
+        weight += 4
+    if intake.get("external_facts_needed"):
+        weight += 1
+    if intake.get("ui_change"):
+        weight += 1
+    risk = intake.get("risk", "low")
+    if risk == "medium":
+        weight += 2
+    if risk == "high":
+        weight += 6
+    streams = intake.get("independent_workstreams", 1)
+    if streams > 1:
+        weight += 2
+
+    # Two tiers: the mid tier was retired once the standard models got strong
+    # enough to carry general work (Kimi K3.1-class and below on the benchmark).
+    if weight >= 8:
+        tier = "critical"
+    reasons.append("weight %d from behavior/acceptance/scope/risk/streams" % weight)
+    if risk == "high":
+        reasons.append("high risk forces critical (AGENTS.md hard override)")
+        tier = "critical"
+    if any(k in (intake.get("request") or "").lower()
+           for k in ("security", "auth", "payment", "migration")):
+        tier = "critical"
+        reasons.append("security/auth/payment/migration keyword forces critical")
+    return tier, "; ".join(reasons)
+
+
+def model_for(team, role, tier):
+    config = team["roles"].get(role)
+    if not isinstance(config, dict):
+        return None
+    routing = config.get("routing")
+    if isinstance(routing, dict) and tier in routing:
+        primary = routing[tier].get("primary") or {}
+        if primary.get("model"):
+            return {"runtime": primary.get("runtime"), "model": primary["model"]}
+    default_model = config.get("default_model")
+    if default_model:
+        models = config.get("models") or {}
+        runtime = None
+        for name, allowed in models.items():
+            if default_model in allowed:
+                runtime = name
+                break
+        return {"runtime": runtime, "model": default_model}
+    return None
+
+
+# Fallback verifier roles when the primary verifier collides with the writer.
+VERIFIER_ALTERNATES = {"reviewer": "tester", "tester": "reviewer"}
+
+
+def _collisions(team, writers, verifiers, tier):
+    clashes = []
+    for verifier in verifiers:
+        vm = model_for(team, verifier, tier)
+        if not vm:
+            return [("unknown", verifier, None)]
+        for writer in writers:
+            wm = model_for(team, writer, tier)
+            if not wm:
+                return [("unknown", verifier, None)]
+            if wm.get("model") == vm.get("model") and wm.get("runtime") == vm.get("runtime"):
+                clashes.append((writer, verifier, vm))
+    return clashes
+
+
+def writing_roles(team, staff_roles):
+    """Only roles that can write the repository can collide with a verifier."""
+    writers = []
+    for role in staff_roles:
+        config = team["roles"].get(role) or {}
+        if config.get("repo_mode") == "write":
+            writers.append(role)
+    return writers or [r for r in staff_roles if r in {"coder", "refactor", "documenter"}]
+
+
+def alternates_for(team, role, tier):
+    config = team["roles"].get(role) or {}
+    routing = config.get("routing") or {}
+    route = routing.get(tier) or {}
+    result = []
+    for alternate in route.get("alternates") or []:
+        if alternate.get("model"):
+            result.append({"runtime": alternate.get("runtime"),
+                           "model": alternate["model"]})
+    return result
+
+
+def cross_model(intake, team, writers, verifiers, shape_id):
+    """Writers and verifiers must not share a model: same model verifies itself."""
+    tier, tier_reason = tier_for(intake, shape_id)
+    if not verifiers or not writers:
+        return {"status": "n/a", "tier": tier, "tier_reason": tier_reason,
+                "pairs": [], "verifiers": verifiers}
+
+    pairs = []
+    clashes = _collisions(team, writers, verifiers, tier)
+    if clashes and clashes[0][0] == "unknown":
+        return {"status": "unknown", "tier": tier, "tier_reason": tier_reason,
+                "pairs": [], "verifiers": verifiers}
+    if not clashes:
+        return {"status": "ok", "tier": tier, "tier_reason": tier_reason,
+                "pairs": [{"writer": w, "role": v, "outcome": "independent",
+                           "reason": "distinct model at %s tier" % tier}
+                          for w in writers for v in verifiers],
+                "verifiers": verifiers}
+
+    # 1. Use a configured alternate at the same tier. This is the routing
+    #    exception the policy already allows; it never changes the task tier.
+    alternate_models = {}
+    for writer, verifier, vm in clashes:
+        if verifier in alternate_models:
+            continue
+        for alternate in alternates_for(team, verifier, tier):
+            takes_independent = all(
+                ((model_for(team, w, tier) or {}).get("runtime"),
+                 (model_for(team, w, tier) or {}).get("model"))
+                != (alternate["runtime"], alternate["model"])
+                for w in writers)
+            if takes_independent:
+                alternate_models[verifier] = alternate
+                pairs.append({
+                    "writer": writer, "role": verifier, "outcome": "alternate",
+                    "runtime": alternate["runtime"], "model": alternate["model"],
+                    "reason": "%s and %s share %s on %s tier; configured alternate "
+                              "%s keeps the verifier independent"
+                              % (writer, verifier, vm.get("model"), tier,
+                                 alternate["model"]),
+                })
+                break
+
+    if alternate_models:
+        clashes_after = []
+        for verifier in verifiers:
+            vm = alternate_models.get(verifier) or model_for(team, verifier, tier) or {}
+            for writer in writers:
+                wm = model_for(team, writer, tier) or {}
+                if (wm.get("model"), wm.get("runtime")) == (vm.get("model"), vm.get("runtime")):
+                    clashes_after.append((writer, verifier))
+        if not clashes_after:
+            return {"status": "alternate", "tier": tier, "tier_reason": tier_reason,
+                    "pairs": pairs, "verifiers": verifiers,
+                    "alternate_models": alternate_models}
+
+    # 2. Raise the whole task one tier so writer and verifier separate naturally.
+    for step in TIER_ORDER[TIER_ORDER.index(tier) + 1:]:
+        if not _collisions(team, writers, verifiers, step):
+            pairs.append({
+                "writer": clashes[0][0], "role": clashes[0][1],
+                "outcome": "tier-escalated", "tier": step,
+                "reason": "%s and %s share %s on %s tier"
+                          % (clashes[0][0], clashes[0][1],
+                             (clashes[0][2] or {}).get("model"), tier),
+            })
+            return {"status": "escalated", "tier": step,
+                    "tier_reason": the_tier_reason(tier_reason, step),
+                    "pairs": pairs, "verifiers": verifiers}
+
+    # 2. Swap a verifier for one that gathers different evidence on a different model.
+    swapped = list(verifiers)
+    for writer, verifier, vm in clashes:
+        alternate = VERIFIER_ALTERNATES.get(verifier)
+        if alternate and alternate not in swapped:
+            if not _collisions(team, writers, [alternate], tier):
+                swapped = [alternate if v == verifier else v for v in swapped]
+                pairs.append({
+                    "writer": writer, "role": verifier, "outcome": "substituted",
+                    "substitute": alternate,
+                    "reason": "%s shares %s with %s on %s tier"
+                              % (verifier, vm.get("model"), writer, tier),
+                })
+    if not _collisions(team, writers, swapped, tier):
+        return {"status": "adjusted", "tier": tier, "tier_reason": tier_reason,
+                "pairs": pairs, "verifiers": swapped}
+
+    # 3. Partially independent: keep the verifiers that are clean, report the rest.
+    unresolved = sorted({verifier for _, verifier, _ in clashes})
+    independent = [v for v in verifiers if v not in unresolved]
+    pairs.append({
+        "writer": clashes[0][0], "role": clashes[0][1],
+        "outcome": "blocked" if not independent else "partial",
+        "reason": "%s and %s share %s at every reachable tier"
+                  % (clashes[0][0], clashes[0][1], (clashes[0][2] or {}).get("model")),
+    })
+    status = "blocked" if not independent else "partial"
+    result = {"status": status, "tier": tier, "tier_reason": tier_reason,
+              "pairs": pairs, "verifiers": verifiers,
+              "unresolved": unresolved,
+              "action": "add an alternate model for %s at %s tier in .agents/team.json"
+                        % (",".join(unresolved), tier)}
+    if independent:
+        result["independent_verifiers"] = independent
+    return result
+
+
+def the_tier_reason(base, escalated):
+    return "%s; raised to %s so the verifier does not run the writer's model" % (
+        base, escalated)
+
+
+def build_staff(team, shape_id, intake, tier):
+    staff = []
+    roles = list(SHAPES[shape_id]["staff"])
+    if shape_id == "W7-feature":
+        if intake.get("ui_change"):
+            roles.insert(0, "designer")
+        if intake.get("external_facts_needed"):
+            roles.insert(0 if not intake.get("ui_change") else 1, "researcher")
+    if shape_id == "W8-investigate" and intake.get("external_facts_needed"):
+        roles.append("researcher")
+
+    streams = intake.get("independent_workstreams", 1)
+    parallel = streams > 1 and shape_id in {"W2-micro", "W3-fix", "W4-fix-test",
+                                            "W5-refactor", "W6-fix-refactor",
+                                            "W7-feature", "W9-ops"}
+    for role in roles:
+        copies = streams if parallel and role in {"coder", "refactor"} else 1
+        for index in range(copies):
+            entry = {"role": role, "model": model_for(team, role, tier)}
+            if copies > 1:
+                entry["workstream"] = "ws-%d" % (index + 1)
+            staff.append(entry)
+    return staff, parallel
+
+
+def explain_shape(shape_id, team, intake):
+    shape = SHAPES[shape_id]
+    tier, tier_reason = tier_for(intake, shape_id)
+    staff, parallel = build_staff(team, shape_id, intake, tier)
+    verifiers = list(shape["verifiers"])
+    risk = intake.get("risk", "low")
+    if shape_id == "W1-doc" and (intake.get("policy_sensitive_doc") or risk != "low"):
+        verifiers = ["reviewer"]
+    if shape_id == "W5-refactor" and intake.get("runnable_acceptance"):
+        verifiers.append("tester")
+    if risk == "high" and shape_id in {"W2-micro", "W3-fix", "W4-fix-test",
+                                       "W5-refactor", "W6-fix-refactor",
+                                       "W7-feature", "W9-ops"}:
+        verifiers = sorted(set(verifiers) | {"reviewer", "tester"})
+    if risk == "medium" and shape_id in {"W3-fix", "W4-fix-test"}:
+        verifiers = sorted(set(verifiers) | {"reviewer"})
+    independence = cross_model(intake, team,
+                               writing_roles(team, [s["role"] for s in staff]),
+                               verifiers, shape_id)
+    return {
+        "staff": staff,
+        "verifiers": independence["verifiers"],
+        "tier": independence["tier"],
+        "independence": independence,
+        "parallel": parallel,
+    }
+
+
+def _dedupe(items):
+    seen = []
+    for item in items:
+        if item not in seen:
+            seen.append(item)
+    return seen
+
+
+def resolve(intake, team):
+    shape_id, rejected = resolve_shape(intake)
+    shape = SHAPES[shape_id]
+    detail = explain_shape(shape_id, team, intake)
+
+    contradictions = []
+    tc = intake.get("task_class")
+    if tc:
+        if tc == "bug-fix" and intake.get("new_behavior"):
+            contradictions.append("task_class=bug-fix but new_behavior is true")
+        if tc == "refactor" and intake.get("new_behavior"):
+            contradictions.append("task_class=refactor but new_behavior is true")
+        if tc in {"advisory", "document", "investigation"} and intake.get("touches_behavior"):
+            contradictions.append("task_class=%s but touches_behavior is true" % tc)
+
+    verifiers = detail["verifiers"]
+
+    gates = list(shape["gates"])
+    if verifiers:
+        gates = [g for g in gates if g != "verification-gate"]
+        gates.append("independent-verification")
+        gates.append("verification-gate")
+    if intake.get("needs_remote_delivery"):
+        gates.append("human-delivery-token")
+    seen = set()
+    gates = [g for g in gates if not (g in seen or seen.add(g))]
+
+    controller = "supervised" if detail["parallel"] or shape_id == "W6-fix-refactor" else "direct"
+    if len([s for s in detail["staff"] if s["role"] in {"coder", "refactor"}]) > 1:
+        controller = "supervised"
+
+    return {
+        "shape": shape_id,
+        "summary": shape["summary"],
+        "task_class": shape["task_classes"][0],
+        "requested_class": intake.get("task_class"),
+        "tier": detail["tier"],
+        "tier_reason": detail["independence"]["tier_reason"],
+        "staff": detail["staff"],
+        "verifiers": verifiers,
+        "controller": controller,
+        "parallel": {
+            "count": intake.get("independent_workstreams", 1),
+            "enabled": detail["parallel"],
+            "isolation": "git-worktree" if detail["parallel"] else "none",
+            "reason": ("independent workstreams were declared; without worktree "
+                       "isolation concurrent writers corrupt each other")
+                      if detail["parallel"] else "single workstream",
+        },
+        "gates": gates,
+        "model_independence": {
+            "status": detail["independence"]["status"],
+            "pairs": _dedupe(detail["independence"].get("pairs", [])),
+            "alternate_models": detail["independence"].get("alternate_models", {}),
+            "unresolved": detail["independence"].get("unresolved", []),
+            "action": detail["independence"].get("action"),
+        },
+        "escalation": {
+            "allowed": 1,
+            "used": 0,
+            "rule": "PM may raise the shape once with a written reason; a second "
+                    "raise requires Human approval",
+        },
+        "rejected_shapes": rejected,
+        "contradictions": contradictions,
+        "reminders": [
+            "Default to the smallest shape; a larger shape needs a written reason, "
+            "not merely a higher tier.",
+            "Every behavior change needs a verifier on a different model than the writer.",
+            "Writers never share a model with the verifier that gates their work.",
+        ],
+    }
+
+
+def render_text(result):
+    lines = []
+    lines.append("Shape:      %s  (%s)" % (result["shape"], result["summary"]))
+    requested = result.get("requested_class")
+    lines.append("Class:      %s%s" % (
+        result["task_class"],
+        "  [requested: %s]" % requested if requested and requested != result["task_class"] else ""))
+    lines.append("Tier:       %s  [%s]" % (result["tier"], result["tier_reason"]))
+    lines.append("Controller: %s" % result["controller"])
+    staff = ", ".join(
+        "%s%s(%s)" % (s["role"], "@" + s["workstream"] if s.get("workstream") else "",
+                      (s["model"] or {}).get("model", "?"))
+        for s in result["staff"]
+    ) or "none - PM answers or delivers directly"
+    lines.append("Staff:      %s" % staff)
+    lines.append("Verifiers:  %s" % (", ".join(result["verifiers"]) or "none"))
+    lines.append("Parallel:   %d stream(s), isolation=%s"
+                 % (result["parallel"]["count"], result["parallel"]["isolation"]))
+    lines.append("Gates:      %s" % ", ".join(result["gates"]))
+    independence = result["model_independence"]
+    lines.append("Independence: %s" % independence["status"])
+    for pair in independence["pairs"]:
+        detail = pair.get("substitute") or pair.get("tier") or ""
+        lines.append("  - %s vs %s: %s%s (%s)"
+                     % (pair["writer"], pair["role"], pair["outcome"],
+                        " -> %s" % detail if detail else "", pair["reason"]))
+    if independence.get("alternate_models"):
+        overrides = ", ".join("%s=%s" % (role, model["model"])
+                              for role, model in independence["alternate_models"].items())
+        lines.append("  * verifier runs on alternate: %s" % overrides)
+    if independence.get("unresolved"):
+        lines.append("  ! not independent: %s" % ", ".join(independence["unresolved"]))
+    if independence.get("action"):
+        lines.append("  ! action: %s" % independence["action"])
+    if result["contradictions"]:
+        lines.append("Contradictions:")
+        for item in result["contradictions"]:
+            lines.append("  ! %s" % item)
+    lines.append("Rejected:")
+    for item in result["rejected_shapes"]:
+        lines.append("  - %s: %s" % (item["shape"], item["reason"]))
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="workflow-shape",
+        description="Resolve an agent-team workflow shape from a structured intake.")
+    parser.add_argument("--intake", default="-",
+                        help="path to intake JSON, or - for stdin (default: -)")
+    parser.add_argument("--team", default=None,
+                        help="path to team.json (default: $TASK_TEAM_FILE or examples/team.json)")
+    parser.add_argument("--format", choices=("json", "text"), default="json")
+    parser.add_argument("--list", action="store_true", help="print the shape catalogue")
+    parser.add_argument("--explain", metavar="SHAPE", default=None,
+                        help="print one shape definition")
+    args = parser.parse_args(argv)
+
+    if args.list:
+        for shape_id, shape in SHAPES.items():
+            print("%-16s %-28s staff=%s verifiers=%s"
+                  % (shape_id, "/".join(shape["task_classes"]),
+                     ",".join(shape["staff"]) or "-",
+                     ",".join(shape["verifiers"]) or "-"))
+        return 0
+    if args.explain:
+        if args.explain not in SHAPES:
+            die("unknown shape %s" % args.explain)
+        print(json.dumps({args.explain: SHAPES[args.explain]}, indent=2))
+        return 0
+
+    team = load_team(
+        args.team
+        or os.environ.get("TASK_TEAM_FILE")
+        or os.environ.get("HERDR_TEAM_FILE")
+        or default_team_path()
+    )
+    try:
+        if args.intake == "-":
+            raw = json.load(sys.stdin)
+        else:
+            with open(args.intake, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+    except json.JSONDecodeError as exc:
+        die("intake is not valid JSON (%s)" % exc)
+    except OSError as exc:
+        die("cannot read intake (%s)" % exc)
+
+    intake = normalise_intake(raw)
+    result = resolve(intake, team)
+    if args.format == "text":
+        print(render_text(result))
+    else:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

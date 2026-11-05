@@ -1,0 +1,646 @@
+#!/usr/bin/env python3
+"""Durable, push-based operational state for one agent-team task."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, Iterator, Optional
+
+SCHEMA_VERSION = 1
+STATES = (
+    "queued", "planned", "in_progress", "blocked", "awaiting_verification",
+    "revision_required", "awaiting_human_commit", "awaiting_auto_commit", "verified", "complete", "stuck",
+)
+TRANSITIONS = {
+    "queued": {"planned", "in_progress", "stuck"},
+    "planned": {"in_progress", "stuck"},
+    "in_progress": {"blocked", "awaiting_verification", "awaiting_human_commit", "complete", "stuck"},
+    "blocked": {"in_progress", "stuck"},
+    "awaiting_human_commit": {"in_progress", "complete", "stuck"},
+    "awaiting_auto_commit": {"in_progress", "complete", "stuck"},
+    "awaiting_verification": {"verified", "revision_required", "stuck"},
+    "revision_required": {"in_progress", "stuck"},
+    "verified": {"in_progress", "awaiting_human_commit", "awaiting_auto_commit", "complete", "stuck"},
+    "complete": set(),
+    "stuck": set(),
+}
+ROLES = {
+    "orchestrator", "pm", "supervisor", "sa", "investigator", "researcher",
+    "designer", "documenter", "coder", "refactor", "reviewer", "tester",
+}
+CONTROLLERS = {"pm", "supervisor"}
+_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+VERIFICATION_PROFILES = {"independent", "deterministic_micro"}
+
+
+class BoardError(Exception):
+    pass
+
+
+def fail(message: str) -> "NoReturn":
+    raise BoardError(message)
+
+
+def now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def actor() -> str:
+    value = (
+        os.environ.get("TASK_AGENT_ROLE")
+        or os.environ.get("HERDR_AGENT_ROLE")
+        or os.environ.get("HERDR_ROLE")
+    )
+    if not value:
+        fail("TASK_AGENT_ROLE (or HERDR_AGENT_ROLE) is required")
+    if value not in ROLES:
+        fail(f"invalid agent role: {value}")
+    return value
+
+
+def require_mutation() -> str:
+    if not (os.environ.get("TASK_BOARD_ENV") == "1" or os.environ.get("HERDR_ENV") == "1"):
+        fail("TASK_BOARD_ENV=1 (or HERDR_ENV=1) is required for task-board mutations")
+    return actor()
+
+
+def require_controller() -> str:
+    value = require_mutation()
+    if value not in CONTROLLERS:
+        fail("only pm or supervisor may change authoritative task state")
+    declared = os.environ.get("HERDR_CONTROLLER_ROLE")
+    if declared and declared not in CONTROLLERS:
+        fail(f"invalid controller role: {declared}")
+    if declared and declared != value:
+        fail(f"controller role mismatch: actor is {value}, declared {declared}")
+    return value
+
+
+def safe_name(value: str, label: str) -> str:
+    if not value or value in {".", ".."} or not _NAME.fullmatch(value):
+        fail(f"invalid {label}: {value!r}")
+    return value
+
+
+def default_root() -> Path:
+    override = os.environ.get("TASK_BOARD_ROOT") or os.environ.get("HERDR_TASK_BOARD_ROOT")
+    if override:
+        return Path(override).expanduser().resolve()
+    workspace = os.environ.get("HERDR_WORKSPACE_ROOT")
+    registry = os.environ.get("HERDR_WORKSPACE_REGISTRY") or os.environ.get("HERDR_REGISTRY")
+    if not registry:
+        candidate = Path.cwd() / ".agents" / "workspace-registry.yaml"
+        registry = str(candidate) if candidate.is_file() else ""
+    if not workspace and registry:
+        try:
+            for line in Path(registry).expanduser().read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("workspace_root:"):
+                    workspace = line.split(":", 1)[1].strip().strip("'\\\"")
+                    break
+        except OSError:
+            pass
+    if not workspace:
+        # Prefer the enclosing Workspaces directory when no registry was
+        # supplied; otherwise retain the documented ~/Workspaces default.
+        cwd = Path.cwd().resolve()
+        for parent in (cwd, *cwd.parents):
+            if parent.name == "Workspaces":
+                workspace = str(parent)
+                break
+    if workspace:
+        return Path(workspace).expanduser().resolve() / ".agents" / "task-board"
+    # Portable default: per-user state, never inside the project worktree.
+    return Path.home() / ".local" / "state" / "agent-team" / "task-board"
+
+
+def _git_root(path: Path) -> Optional[Path]:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    value = completed.stdout.strip()
+    return Path(value).resolve() if value else None
+
+
+def root_from(args: argparse.Namespace) -> Path:
+    root = Path(args.root).expanduser().resolve() if getattr(args, "root", None) else default_root()
+    cwd = Path.cwd().resolve()
+    repo_root = _git_root(cwd)
+    if repo_root and (root == repo_root or repo_root in root.parents):
+        fail("task-board state root must be outside the project worktree")
+
+    # If the target does not exist yet, Git can only inspect its nearest
+    # existing ancestor. This catches roots nested in a separate repository.
+    probe = root
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    target_repo = _git_root(probe) if probe.is_dir() else None
+    if target_repo and (root == target_repo or target_repo in root.parents):
+        fail("task-board state root must be outside the project worktree")
+    return root
+
+
+def task_dir(root: Path, project: str, task_id: str) -> Path:
+    return root / safe_name(project, "project") / safe_name(task_id, "task_id")
+
+
+def state_path(root: Path, project: str, task_id: str) -> Path:
+    return task_dir(root, project, task_id) / "state.json"
+
+
+def events_path(root: Path, project: str, task_id: str) -> Path:
+    return task_dir(root, project, task_id) / "events.jsonl"
+
+
+@contextmanager
+def task_lock(directory: Path) -> Iterator[None]:
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = directory / ".lock"
+    deadline = time.monotonic() + float(os.environ.get("HERDR_TASK_BOARD_LOCK_TIMEOUT", "30"))
+    while True:
+        try:
+            lock.mkdir()
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                fail(f"task lock timed out: {directory}")
+            time.sleep(0.01)
+    try:
+        yield
+    finally:
+        try:
+            lock.rmdir()
+        except OSError:
+            pass
+
+
+def read_state(root: Path, project: str, task_id: str) -> Dict[str, Any]:
+    path = state_path(root, project, task_id)
+    try:
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+    except FileNotFoundError:
+        fail(f"task not found: {project}/{task_id}")
+    except json.JSONDecodeError as exc:
+        fail(f"corrupt state file: {path}: {exc}")
+    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
+        fail(f"unsupported or invalid state schema: {path}")
+    return value
+
+
+def write_state(path: Path, state: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".state.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def append_event(root: Path, project: str, task_id: str, event_actor: str,
+                 event_type: str, payload: Any) -> str:
+    directory = task_dir(root, project, task_id)
+    event_id = uuid.uuid4().hex
+    entry = {
+        "event_id": event_id,
+        "actor": event_actor,
+        "timestamp": now(),
+        "type": event_type,
+        "payload": payload if isinstance(payload, dict) else {"value": payload},
+    }
+    with events_path(root, project, task_id).open("a", encoding="utf-8") as handle:
+        # Opening in append mode guarantees that an event can never overwrite
+        # an earlier event, even if a caller accidentally seeks its fd.
+        json.dump(entry, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return event_id
+
+
+def payload_arg(value: Optional[str]) -> Dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        fail(f"payload must be valid JSON: {exc}")
+    if not isinstance(parsed, dict):
+        fail("payload must be a JSON object")
+    return parsed
+
+
+def cmd_create(args: argparse.Namespace) -> int:
+    event_actor = require_controller()
+    root = root_from(args)
+    project, task_id = safe_name(args.project, "project"), safe_name(args.task_id, "task_id")
+    initial = args.state or "queued"
+    if initial not in {"queued", "planned"}:
+        fail("create state must be queued or planned")
+    verification_profile = args.verification_profile.replace("-", "_")
+    if verification_profile not in VERIFICATION_PROFILES:
+        fail(f"invalid verification profile: {verification_profile}")
+    if args.commit_required and not args.verification_required:
+        fail("commit_required tasks must require verification")
+    if args.auto_commit and not args.commit_required:
+        fail("auto_commit requires commit_required")
+    controller = args.controller or event_actor
+    if controller not in CONTROLLERS:
+        fail(f"invalid controller: {controller}")
+    directory = task_dir(root, project, task_id)
+    with task_lock(directory):
+        if state_path(root, project, task_id).exists():
+            fail(f"task already exists: {project}/{task_id}")
+        timestamp = now()
+        state = {
+            "schema_version": SCHEMA_VERSION,
+            "project": project,
+            "task_id": task_id,
+            "run_id": args.run_id or uuid.uuid4().hex,
+            "state": initial,
+            "owner": args.owner or event_actor,
+            "controller": controller,
+            "verification_required": args.verification_required,
+            "verification_profile": verification_profile,
+            "commit_required": args.commit_required,
+            "commit_mode": "auto" if args.auto_commit else ("manual" if args.commit_required else "none"),
+            "candidate_diff_sha256": None,
+            "verified_diff_sha256": None,
+            "commit_sha": None,
+            "current_node": args.current_node,
+            "depends_on": list(args.depends_on or []),
+            "revision": 0,
+            "attempt": 0,
+            "artifacts": [],
+            "verification": [],
+            "human_gate": None,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "last_event_id": None,
+        }
+        event_id = append_event(root, project, task_id, event_actor, "created", {
+            "state": initial, "owner": state["owner"], "controller": state["controller"],
+            "verification_profile": verification_profile,
+        })
+        state["last_event_id"] = event_id
+        write_state(state_path(root, project, task_id), state)
+    print(json.dumps(state, indent=2, sort_keys=True) if args.json else f"created {project}/{task_id} ({initial})")
+    return 0
+
+
+def cmd_event(args: argparse.Namespace) -> int:
+    event_actor = require_mutation()
+    root = root_from(args)
+    project, task_id = safe_name(args.project, "project"), safe_name(args.task_id, "task_id")
+    with task_lock(task_dir(root, project, task_id)):
+        read_state(root, project, task_id)
+        event_type = args.type_opt or args.event_type or "protocol"
+        event_id = append_event(root, project, task_id, event_actor, event_type, payload_arg(args.payload))
+    if args.json:
+        print(json.dumps({"event_id": event_id}, sort_keys=True))
+    else:
+        print(event_id)
+    return 0
+
+
+def cmd_transition(args: argparse.Namespace) -> int:
+    event_actor = require_controller()
+    root = root_from(args)
+    project, task_id = safe_name(args.project, "project"), safe_name(args.task_id, "task_id")
+    target = args.target_state or args.state
+    if not target:
+        fail("a target state is required")
+    if target not in STATES:
+        fail(f"invalid target state: {target}")
+    with task_lock(task_dir(root, project, task_id)):
+        state = read_state(root, project, task_id)
+        old = state["state"]
+        state_controller = state.get("controller")
+        if state_controller not in CONTROLLERS:
+            fail("task state has an invalid controller")
+        verification_required = state.get("verification_required", True)
+        verification_profile = state.get("verification_profile", "independent")
+        if verification_profile not in VERIFICATION_PROFILES:
+            fail("task state has an invalid verification profile")
+        commit_required = state.get("commit_required", False)
+        commit_mode = state.get("commit_mode", "manual" if commit_required else "none")
+        # The assigned controller owns authoritative transitions. PM owns the
+        # final confirmation after a Supervisor-owned task reaches its required
+        # Human commit gate or its non-commit completion gate.
+        if event_actor != state_controller and not (
+            event_actor == "pm" and target == "complete" and (
+                old in {"awaiting_human_commit", "awaiting_auto_commit"}
+                or (old == "verified" and not commit_required)
+                or (
+                    old == "in_progress"
+                    and state_controller == "supervisor"
+                    and verification_required is False
+                    and not commit_required
+                )
+            )
+        ):
+            fail(
+                f"controller mismatch: task is owned by {state_controller}, "
+                f"not {event_actor}"
+            )
+        if target == "complete" and event_actor != "pm":
+            fail("only pm may transition tasks to complete")
+        if target not in TRANSITIONS.get(old, set()):
+            fail(f"invalid transition: {old} -> {target}")
+        if target == "awaiting_verification" and not verification_required:
+            fail("awaiting_verification requires verification")
+        if target == "verified" and not verification_required:
+            fail("verified requires verification")
+        if target == "awaiting_human_commit":
+            if not commit_required:
+                fail("awaiting_human_commit requires commit_required")
+            if commit_mode != "manual":
+                fail("awaiting_human_commit requires manual commit mode")
+            required_source = "verified"
+            if old != required_source:
+                fail(
+                    f"awaiting_human_commit requires prior state {required_source}"
+                )
+        if target == "awaiting_auto_commit":
+            if not commit_required or commit_mode != "auto":
+                fail("awaiting_auto_commit requires auto commit mode")
+            if old != "verified":
+                fail("awaiting_auto_commit requires prior state verified")
+        if target == "complete":
+            if commit_required:
+                required_source = "awaiting_auto_commit" if commit_mode == "auto" else "awaiting_human_commit"
+            elif verification_required:
+                required_source = "verified"
+            else:
+                required_source = "in_progress"
+            if old != required_source:
+                fail(f"complete requires prior state {required_source}")
+
+        if target == "awaiting_verification":
+            candidate_diff = args.candidate_diff
+            if not isinstance(candidate_diff, str) or not _SHA256.fullmatch(candidate_diff):
+                fail("awaiting_verification requires --candidate-diff SHA-256")
+            if not args.artifact:
+                fail("awaiting_verification requires --artifact")
+            state["candidate_diff_sha256"] = candidate_diff
+
+        verification_entry = payload_arg(args.verification) if args.verification else None
+        if target == "verified":
+            verified_diff = (verification_entry or {}).get("diff")
+            if not isinstance(verified_diff, str) or not _SHA256.fullmatch(verified_diff):
+                fail("verified requires --verification JSON with a diff SHA-256")
+            candidate_diff = state.get("candidate_diff_sha256")
+            if candidate_diff is None and "candidate_diff_sha256" not in state:
+                # Compatibility for a task snapshot created before candidate
+                # hashes were persisted. New tasks always bind this earlier.
+                candidate_diff = verified_diff
+                state["candidate_diff_sha256"] = candidate_diff
+            if verified_diff != candidate_diff:
+                fail("verified diff does not match the frozen candidate diff")
+            verification_mode = (verification_entry or {}).get("mode", "independent")
+            expected_mode = verification_profile
+            if verification_mode != expected_mode:
+                fail(
+                    f"verification mode does not match profile: expected {expected_mode}, "
+                    f"got {verification_mode}"
+                )
+            if expected_mode == "deterministic_micro":
+                evidence = (verification_entry or {}).get("evidence")
+                if not isinstance(evidence, str) or not evidence.strip():
+                    fail("deterministic_micro verification requires evidence")
+            state["verified_diff_sha256"] = verified_diff
+
+        gate = payload_arg(args.human_gate) if args.human_gate is not None else None
+        if target == "awaiting_human_commit":
+            gate_diff = (gate or {}).get("diff")
+            if not args.artifact:
+                fail("awaiting_human_commit requires --artifact")
+            if not isinstance(gate_diff, str) or not _SHA256.fullmatch(gate_diff):
+                fail("awaiting_human_commit requires --human-gate JSON with a diff SHA-256")
+            if verification_required and gate_diff != state.get("verified_diff_sha256"):
+                fail("Human commit gate diff does not match the verified diff")
+        if target == "awaiting_auto_commit":
+            gate_diff = (gate or {}).get("diff")
+            if not args.artifact:
+                fail("awaiting_auto_commit requires --artifact")
+            if (gate or {}).get("mode") != "auto":
+                fail("awaiting_auto_commit requires --human-gate JSON with mode auto")
+            if not isinstance(gate_diff, str) or not _SHA256.fullmatch(gate_diff):
+                fail("awaiting_auto_commit requires --human-gate JSON with a diff SHA-256")
+            if verification_required and gate_diff != state.get("verified_diff_sha256"):
+                fail("Auto commit gate diff does not match the verified diff")
+        if target == "complete":
+            if commit_required:
+                if not isinstance(args.commit, str) or not _GIT_OID.fullmatch(args.commit):
+                    fail("complete requires --commit with the authorized commit SHA")
+                state["commit_sha"] = args.commit
+            elif args.commit is not None:
+                fail("--commit is valid only when commit_required is true")
+        if args.current_node is not None:
+            state["current_node"] = args.current_node
+        if args.attempt is not None:
+            if args.attempt < 0:
+                fail("attempt must not be negative")
+            state["attempt"] = args.attempt
+        if gate is not None:
+            state["human_gate"] = gate
+        elif target == "awaiting_human_commit":
+            state["human_gate"] = {"required": True}
+        elif old in {"awaiting_human_commit", "awaiting_auto_commit"} and target not in {"awaiting_human_commit", "awaiting_auto_commit"}:
+            state["human_gate"] = None
+        if target == "revision_required" or (
+            target == "in_progress" and old in {"revision_required", "verified", "awaiting_human_commit", "awaiting_auto_commit"}
+        ):
+            state["candidate_diff_sha256"] = None
+            state["verified_diff_sha256"] = None
+        if args.artifact:
+            state["artifacts"].append(args.artifact)
+        if verification_entry is not None:
+            state["verification"].append(verification_entry)
+        if target == "revision_required":
+            if state["revision"] >= 2:
+                fail("revision limit exceeded: maximum is 2")
+            state["revision"] += 1
+            if args.attempt is None:
+                state["attempt"] += 1
+        state["state"] = target
+        state["updated_at"] = now()
+        payload = payload_arg(args.payload)
+        payload.update({"from": old, "to": target})
+        event_id = append_event(root, project, task_id, event_actor, "transition", payload)
+        state["last_event_id"] = event_id
+        write_state(state_path(root, project, task_id), state)
+    print(json.dumps(state, indent=2, sort_keys=True) if args.json else f"{project}/{task_id}: {old} -> {target}")
+    return 0
+
+
+def print_state(state: Dict[str, Any], as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(state, indent=2, sort_keys=True))
+    else:
+        print(f"{state['project']}/{state['task_id']}: {state['state']}")
+        for key in (
+            "owner", "controller", "verification_required", "verification_profile",
+            "commit_required", "commit_mode",
+            "candidate_diff_sha256", "verified_diff_sha256", "commit_sha",
+            "current_node", "revision", "attempt", "updated_at",
+        ):
+            print(f"{key}: {state.get(key)}")
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    state = read_state(root_from(args), args.project, args.task_id)
+    print_state(state, args.json)
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    root = root_from(args)
+    values = []
+    if root.exists():
+        for path in sorted(root.glob("*/*/state.json")):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if args.project and value.get("project") != args.project:
+                continue
+            if args.state and value.get("state") != args.state:
+                continue
+            values.append(value)
+    if args.json:
+        print(json.dumps(values, indent=2, sort_keys=True))
+    else:
+        for value in values:
+            print(f"{value.get('project')}/{value.get('task_id')}: {value.get('state')}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="task-board", description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def common(command: argparse.ArgumentParser) -> None:
+        command.add_argument("project")
+        command.add_argument("task_id")
+        command.add_argument("--root")
+
+    create = sub.add_parser("create", help="create a queued or planned task")
+    common(create)
+    create.add_argument("--state", choices=["queued", "planned"])
+    create.add_argument("--owner")
+    create.add_argument("--controller")
+    verification = create.add_mutually_exclusive_group()
+    verification.add_argument(
+        "--verification-required", dest="verification_required",
+        action="store_true", default=True,
+    )
+    verification.add_argument(
+        "--no-verification", dest="verification_required", action="store_false",
+    )
+    create.add_argument(
+        "--verification-profile",
+        choices=["independent", "deterministic-micro"],
+        default="independent",
+        help="verification gate; deterministic-micro is for existing text files with numeric-only edits",
+    )
+    commit = create.add_mutually_exclusive_group()
+    commit.add_argument(
+        "--commit-required", dest="commit_required", action="store_true", default=False,
+    )
+    commit.add_argument(
+        "--no-commit", dest="commit_required", action="store_false",
+    )
+    create.add_argument(
+        "--auto-commit", action="store_true",
+        help="record scope-approved automatic commit after verification",
+    )
+    create.add_argument("--run-id")
+    create.add_argument("--current-node")
+    create.add_argument("--depends-on", action="append")
+    create.add_argument("--json", action="store_true")
+    create.set_defaults(func=cmd_create)
+
+    show = sub.add_parser("show", help="show a task snapshot")
+    common(show)
+    show.add_argument("--json", action="store_true")
+    show.set_defaults(func=cmd_show)
+
+    listing = sub.add_parser("list", help="list task snapshots")
+    listing.add_argument("--root")
+    listing.add_argument("--project")
+    listing.add_argument("--state", choices=STATES)
+    listing.add_argument("--json", action="store_true")
+    listing.set_defaults(func=cmd_list)
+
+    event = sub.add_parser("event", help="append an immutable event")
+    common(event)
+    event.add_argument("event_type", nargs="?")
+    event.add_argument("--type", dest="type_opt")
+    event.add_argument("--payload", default="{}")
+    event.add_argument("--json", action="store_true")
+    event.set_defaults(func=cmd_event)
+
+    transition = sub.add_parser("transition", help="change authoritative task state")
+    common(transition)
+    transition.add_argument("state", nargs="?", choices=STATES)
+    transition.add_argument("--to", "--state", dest="target_state", choices=STATES)
+    transition.add_argument("--current-node")
+    transition.add_argument("--attempt", type=int)
+    transition.add_argument("--human-gate")
+    transition.add_argument("--artifact")
+    transition.add_argument("--candidate-diff")
+    transition.add_argument("--commit")
+    transition.add_argument("--verification")
+    transition.add_argument("--payload", default="{}")
+    transition.add_argument("--json", action="store_true")
+    transition.set_defaults(func=cmd_transition)
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    try:
+        args = build_parser().parse_args(argv)
+        return int(args.func(args))
+    except BoardError as exc:
+        print(f"task-board: {exc}", file=sys.stderr)
+        return 1
+    except BrokenPipeError:
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

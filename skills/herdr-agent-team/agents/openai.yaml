@@ -1,0 +1,4 @@
+interface:
+  display_name: "Herdr Agent Team"
+  short_description: "Multi-agent delivery with enforced staffing, scope locks and verification gates"
+  default_prompt: "Use $herdr-agent-team to staff this task with the smallest team, lock its scope, and gate the commit on a verified diff hash."

@@ -1,0 +1,14 @@
+{
+  "task_class": "bug-fix",
+  "request": "A draft row of a bulk-upload batch disappears when another row is edited.",
+  "touches_behavior": true,
+  "known_cause": true,
+  "runnable_acceptance": true,
+  "structural_cleanup": false,
+  "new_behavior": false,
+  "ui_change": false,
+  "external_facts_needed": false,
+  "policy_sensitive_doc": false,
+  "risk": "medium",
+  "independent_workstreams": 1
+}

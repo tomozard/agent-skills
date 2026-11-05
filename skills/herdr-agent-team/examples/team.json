@@ -1,0 +1,479 @@
+{
+  "version": 4,
+  "runtime_order": [
+    "pi",
+    "claude"
+  ],
+  "disabled_model_providers": [],
+  "roles": {
+    "orchestrator": {
+      "team": "global-control",
+      "reports_to": "human",
+      "controls": [
+        "pm"
+      ],
+      "may_read_direct_reports": true,
+      "repo_mode": "read_only",
+      "may_local_commit": false,
+      "may_authorized_push": false,
+      "may_authorized_pr_create": false,
+      "may_remote_deliver": false,
+      "model_selection": "fixed",
+      "models": {
+        "pi": [
+          "antigravity/gemini-3.8-flash"
+        ]
+      },
+      "default_model": "antigravity/gemini-3.8-flash"
+    },
+    "pm": {
+      "team": "manager",
+      "reports_to": "orchestrator",
+      "controls": [
+        "sa",
+        "investigator",
+        "researcher",
+        "designer",
+        "supervisor",
+        "documenter",
+        "coder",
+        "refactor",
+        "reviewer",
+        "tester"
+      ],
+      "may_read_direct_reports": true,
+      "repo_mode": "read_only",
+      "may_local_commit": false,
+      "may_authorized_push": false,
+      "may_authorized_pr_create": false,
+      "may_remote_deliver": false,
+      "may_document_write": false,
+      "model_selection": "fixed",
+      "models": {
+        "pi": [
+          "opencode-go/deepseek-v4.1-flash"
+        ]
+      },
+      "default_model": "opencode-go/deepseek-v4.1-flash"
+    },
+    "supervisor": {
+      "team": "manager",
+      "reports_to": "pm",
+      "controls": [
+        "coder",
+        "refactor",
+        "reviewer",
+        "tester"
+      ],
+      "may_read_direct_reports": true,
+      "repo_mode": "read_only",
+      "may_local_commit": true,
+      "may_authorized_push": true,
+      "may_authorized_pr_create": true,
+      "may_remote_deliver": false,
+      "model_selection": "controller",
+      "models": {
+        "pi": [
+          "opencode-go/deepseek-v4.1-flash"
+        ]
+      },
+      "routing": {
+        "standard": {
+          "primary": {
+            "runtime": "pi",
+            "model": "opencode-go/deepseek-v4.1-flash"
+          },
+          "alternates": []
+        },
+        "critical": {
+          "primary": {
+            "runtime": "pi",
+            "model": "opencode-go/deepseek-v4.1-flash"
+          },
+          "alternates": []
+        }
+      }
+    },
+    "documenter": {
+      "team": "document",
+      "reports_to": "pm",
+      "controls": [],
+      "may_read_direct_reports": false,
+      "repo_mode": "read_only",
+      "may_local_commit": false,
+      "may_authorized_push": false,
+      "may_authorized_pr_create": false,
+      "may_remote_deliver": false,
+      "may_document_write": true,
+      "model_selection": "controller",
+      "models": {
+        "pi": [
+          "antigravity/gemini-3.8-flash"
+        ]
+      },
+      "routing": {
+        "standard": {
+          "primary": {
+            "runtime": "pi",
+            "model": "antigravity/gemini-3.8-flash"
+          },
+          "alternates": []
+        },
+        "critical": {
+          "primary": {
+            "runtime": "pi",
+            "model": "antigravity/gemini-3.8-flash"
+          },
+          "alternates": []
+        }
+      }
+    },
+    "sa": {
+      "team": "planner",
+      "reports_to": "pm",
+      "controls": [],
+      "may_read_direct_reports": false,
+      "repo_mode": "read_only",
+      "may_local_commit": false,
+      "may_authorized_push": false,
+      "may_authorized_pr_create": false,
+      "may_remote_deliver": false,
+      "model_selection": "controller",
+      "models": {
+        "pi": [
+          "alibaba-token-intl/qwen3.8-max",
+          "antigravity/gemini-3.8-flash"
+        ],
+        "claude": [
+          "opus"
+        ]
+      },
+      "routing": {
+        "standard": {
+          "primary": {
+            "runtime": "pi",
+            "model": "antigravity/gemini-3.8-flash"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "alibaba-token-intl/qwen3.8-max"
+            }
+          ]
+        },
+        "critical": {
+          "primary": {
+            "runtime": "claude",
+            "model": "opus"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "alibaba-token-intl/qwen3.8-max"
+            }
+          ]
+        }
+      }
+    },
+    "investigator": {
+      "team": "planner",
+      "reports_to": "pm",
+      "controls": [],
+      "may_read_direct_reports": false,
+      "repo_mode": "read_only",
+      "may_local_commit": false,
+      "may_authorized_push": false,
+      "may_authorized_pr_create": false,
+      "may_remote_deliver": false,
+      "may_vault_read": true,
+      "model_selection": "controller",
+      "models": {
+        "pi": [
+          "opencode-go/deepseek-v4.1-flash",
+          "antigravity/gemini-3.8-flash"
+        ],
+        "claude": [
+          "opus"
+        ]
+      },
+      "routing": {
+        "standard": {
+          "primary": {
+            "runtime": "pi",
+            "model": "opencode-go/deepseek-v4.1-flash"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "antigravity/gemini-3.8-flash"
+            }
+          ]
+        },
+        "critical": {
+          "primary": {
+            "runtime": "claude",
+            "model": "opus"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "antigravity/gemini-3.8-flash"
+            }
+          ]
+        }
+      }
+    },
+    "researcher": {
+      "team": "planner",
+      "reports_to": "pm",
+      "controls": [],
+      "may_read_direct_reports": false,
+      "repo_mode": "read_only",
+      "may_local_commit": false,
+      "may_authorized_push": false,
+      "may_authorized_pr_create": false,
+      "may_remote_deliver": false,
+      "model_selection": "controller",
+      "models": {
+        "pi": [
+          "antigravity/gemini-3.8-flash"
+        ]
+      },
+      "routing": {
+        "standard": {
+          "primary": {
+            "runtime": "pi",
+            "model": "antigravity/gemini-3.8-flash"
+          },
+          "alternates": []
+        },
+        "critical": {
+          "primary": {
+            "runtime": "pi",
+            "model": "antigravity/gemini-3.8-flash"
+          },
+          "alternates": []
+        }
+      }
+    },
+    "designer": {
+      "team": "planner",
+      "reports_to": "pm",
+      "controls": [],
+      "may_read_direct_reports": false,
+      "repo_mode": "read_only",
+      "may_local_commit": false,
+      "may_authorized_push": false,
+      "may_authorized_pr_create": false,
+      "may_remote_deliver": false,
+      "model_selection": "fixed",
+      "models": {
+        "claude": [
+          "opus"
+        ]
+      },
+      "default_model": "opus"
+    },
+    "coder": {
+      "team": "worker",
+      "reports_to": [
+        "supervisor",
+        "pm"
+      ],
+      "controls": [],
+      "may_read_direct_reports": false,
+      "repo_mode": "write",
+      "may_local_commit": true,
+      "may_authorized_push": true,
+      "may_authorized_pr_create": true,
+      "may_remote_deliver": false,
+      "model_selection": "controller",
+      "models": {
+        "pi": [
+          "opencode-go/deepseek-v4.1-flash",
+          "antigravity/gemini-3.8-flash"
+        ],
+        "claude": [
+          "opus"
+        ]
+      },
+      "routing": {
+        "standard": {
+          "primary": {
+            "runtime": "pi",
+            "model": "opencode-go/deepseek-v4.1-flash"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "antigravity/gemini-3.8-flash"
+            }
+          ]
+        },
+        "critical": {
+          "primary": {
+            "runtime": "claude",
+            "model": "opus"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "opencode-go/deepseek-v4.1-flash"
+            }
+          ]
+        }
+      }
+    },
+    "refactor": {
+      "team": "worker",
+      "reports_to": [
+        "supervisor",
+        "pm"
+      ],
+      "controls": [],
+      "may_read_direct_reports": false,
+      "repo_mode": "write",
+      "may_local_commit": true,
+      "may_authorized_push": true,
+      "may_authorized_pr_create": true,
+      "may_remote_deliver": false,
+      "model_selection": "controller",
+      "models": {
+        "pi": [
+          "opencode-go/deepseek-v4.1-flash",
+          "antigravity/gemini-3.8-flash"
+        ],
+        "claude": [
+          "opus"
+        ]
+      },
+      "routing": {
+        "standard": {
+          "primary": {
+            "runtime": "pi",
+            "model": "antigravity/gemini-3.8-flash"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "opencode-go/deepseek-v4.1-flash"
+            }
+          ]
+        },
+        "critical": {
+          "primary": {
+            "runtime": "claude",
+            "model": "opus"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "opencode-go/deepseek-v4.1-flash"
+            }
+          ]
+        }
+      }
+    },
+    "reviewer": {
+      "team": "verifier",
+      "reports_to": [
+        "supervisor",
+        "pm"
+      ],
+      "controls": [],
+      "may_read_direct_reports": false,
+      "repo_mode": "read_only",
+      "may_local_commit": false,
+      "may_authorized_push": false,
+      "may_authorized_pr_create": false,
+      "may_remote_deliver": false,
+      "model_selection": "controller",
+      "models": {
+        "pi": [
+          "antigravity/gemini-3.8-flash",
+          "alibaba-token-intl/qwen3.8-max"
+        ],
+        "claude": [
+          "opus"
+        ]
+      },
+      "routing": {
+        "standard": {
+          "primary": {
+            "runtime": "pi",
+            "model": "alibaba-token-intl/qwen3.8-max"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "antigravity/gemini-3.8-flash"
+            }
+          ]
+        },
+        "critical": {
+          "primary": {
+            "runtime": "claude",
+            "model": "opus"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "alibaba-token-intl/qwen3.8-max"
+            }
+          ]
+        }
+      }
+    },
+    "tester": {
+      "team": "verifier",
+      "reports_to": [
+        "supervisor",
+        "pm"
+      ],
+      "controls": [],
+      "may_read_direct_reports": false,
+      "repo_mode": "read_only",
+      "may_local_commit": false,
+      "may_authorized_push": false,
+      "may_authorized_pr_create": false,
+      "may_remote_deliver": false,
+      "model_selection": "controller",
+      "models": {
+        "pi": [
+          "opencode-go/deepseek-v4.1-flash",
+          "antigravity/gemini-3.8-flash",
+          "alibaba-token-intl/qwen3.8-max"
+        ],
+        "claude": [
+          "sonnet"
+        ]
+      },
+      "routing": {
+        "standard": {
+          "primary": {
+            "runtime": "pi",
+            "model": "antigravity/gemini-3.8-flash"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "alibaba-token-intl/qwen3.8-max"
+            }
+          ]
+        },
+        "critical": {
+          "primary": {
+            "runtime": "claude",
+            "model": "sonnet"
+          },
+          "alternates": [
+            {
+              "runtime": "pi",
+              "model": "antigravity/gemini-3.8-flash"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
