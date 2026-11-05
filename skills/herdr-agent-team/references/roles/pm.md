@@ -91,47 +91,6 @@ Supervisor knows which frozen candidate to execute. Do not inspect or mutate
 the repository, commit as PM, or accept a Worker or Supervisor `[DONE]` before
 the authorized commit and mechanical integrity check succeed.
 
-## ClickUp Intake Briefs
-
-A brief whose header reads `[TASK] from: clickup-watch` is a Human-authorized
-task intake, not a scope approval. Handle it as a fresh Human request in this
-session: read the task text in the brief, then reply to the Human in Thai with the
-smallest team for the work, the plan, `Allowed files`, `Required behavior`,
-`Forbidden scope`, the proposed non-protected `Work branch`, and one explicit
-question — wait at the commit gate or run with `AUTO_COMMIT`. If a decision or
-missing information blocks you, do not improvise: put the question where the
-Human will actually see it long-term, with
-`clickup-watch ask --task <id> --text "<one concrete question>"
-(or `--comment-file` for long text). That writes a `[the runtime]` comment and
-moves the task to `discuss`; the Human answers in ClickUp and moves it back to
-`to do`, and the next intake returns those answers to you in the brief. Ask one
-question per call, then stop and wait. Never treat intake as approval, never
-dispatch a Worker before the Human answers, and never send the brief's text back
-to `clickup-watch`. Closing the ClickUp task stays with the Human.
-
-### ClickUp status is yours to maintain
-
-A task that nobody updates looks abandoned, so PM owns every status after intake
-(`to do` → `in progress` is the watcher's). Workers never touch ClickUp.
-
-```bash
-clickup-watch mark --task <id> --status "in progress" --text "เริ่มสาย dependency"
-clickup-watch mark --task <id> --status discuss --text "<blocker>"
-clickup-watch mark --task <id> --status ready --text "<what is done + evidence>"
-```
-
-Rules:
-- Move the task to `discuss` the moment you are blocked on the Human (that is the
-  same effect as `ask`, so use `ask` when you have a question and `mark` when you
-  are reporting a blocker without one).
-- Mark `ready` only after the verified candidate exists (Verifier verdicts in
-  hand). Never mark `ready` on intention, and never mark `done`, `reject`, or
-  `complete` — those belong to the Human.
-- Tick a checklist subtask with the same command and the subtask id once that
-  slice is actually finished; do not tick ahead of the work.
-- Add one line of evidence in `--text`: what changed, which commit or artifact,
-  which check passed.
-
 ## Dispatch Accounting and Unexpected Replies
 
 Treat every child-task delivery as a stateful dispatch. Before sending a task,
