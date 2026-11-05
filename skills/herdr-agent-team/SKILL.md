@@ -34,7 +34,7 @@ spawn a process and send a message.
 
 | Step | Owner | Output |
 |---|---|---|
-| 1. Intake | PM | one intake file describing the task: class, behavior change, risk, workstreams |
+| 1. Describe the task | PM | one intake file (JSON): task class, behavior change, risk, workstreams |
 | 2. Resolve | `workflow-shape` | shape, staff, verifiers, tier, and why larger shapes were rejected |
 | 3. Lock scope | PM | `Allowed files`, `Required behavior`, `Forbidden scope`, work branch |
 | 4. Execute | worker | edits inside the allowed files only |
@@ -42,6 +42,10 @@ spawn a process and send a message.
 | 6. Verify | verifier(s) | PASS on that exact hash, with a revision budget of two |
 | 7. Commit | worker, after the Human token | one commit whose diff is compared mechanically to the verified hash |
 | 8. Deliver | worker or controller | push and PR only on exact Human authorization |
+
+"Intake" here means only that task-description file — the resolver's input. No
+tracker, issue sync, or external service is involved; wire one up yourself and
+keep this same file as the contract.
 
 The freeze-verify-commit step is the reason this exists: a commit is allowed
 only for a diff hash that an independent verifier already passed, and any change
