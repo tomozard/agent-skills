@@ -38,6 +38,8 @@ Responsibilities:
 - when delegating to a Verifier, resolve the Supervisor's own session ID from the
   current the runtime context and put it in the child task as `Controller session`;
   never copy PM's upstream `sender_session` into a Verifier task;
+- send the `Verification Scope` block from the frozen candidate artifact with every
+  Verifier assignment, so the changed files — not `Allowed files` — bound the work;
 - route `CHANGES_REQUIRED` back to Worker;
 - after a revision, send a new revision task to every selected Verifier's
   existing session and agent instance; fresh verification means rerunning the

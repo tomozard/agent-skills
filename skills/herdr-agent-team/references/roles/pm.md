@@ -265,6 +265,20 @@ selection requires a written risk-based `Premium reason`. If a document truly
 has runnable acceptance and selects Tester, pass `--runnable-acceptance` to
 the spawn helper.
 
+The Acceptance Gate is the Verifier's entire mandate. Write each criterion as an
+observable check with a stable ID (`B1`, `B2`, ... for `BLOCKER`; `A1`, ... for
+`ADVISORY`) against a named `Required behavior` item, and send that block verbatim
+in every Reviewer and Tester assignment. A brief whose criteria are not observable,
+or a dispatch that omits the block, is not dispatchable: it produces an unbounded
+review and a rewrite request instead of a verdict. Record in the Dispatch Record
+that the Acceptance Gate was included.
+
+The `Verification Scope` block bounds every Verifier dispatch. Take the changed
+files from the frozen candidate artifact, not from `Allowed files` and not from
+memory, and send the block with the assignment so the reviewer or tester reads the
+diff and what it touches — not the module, and not the repository. Widening that
+boundary after dispatch needs a written reason and is allowed once.
+
 Before routing any revision, verify that the finding is a `BLOCKER` tied to an
 approved acceptance criterion and record `Revision: 1/2` or `Revision: 2/2`
 with the blocker IDs. Treat `ADVISORY` findings as completion notes. After

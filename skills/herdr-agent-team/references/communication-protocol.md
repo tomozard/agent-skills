@@ -590,11 +590,57 @@ verdict. Put detailed evidence in a file and pass its absolute path in the one
 verdict message. Verifiers must not call `agent_done` after the verdict; the
 single verdict is the completion handoff to their controller.
 
+Every Verifier assignment carries the brief's `Acceptance Gate` verbatim, with
+stable criterion IDs — `B1`, `B2`, ... for `BLOCKER`, `A1`, ... for `ADVISORY` —
+and one observable check per `Required behavior` item. An assignment without it is
+not dispatchable: the Verifier replies `[STUCK] missing: acceptance gate` instead
+of inventing a standard, and the controller fixes the brief before resending.
+Reviewing without stated criteria is a brief defect, not verifier diligence.
+
 Every Verifier assignment includes `Candidate artifact` and `Candidate Diff
 SHA-256`. Verifiers run `agent_verify_staged_diff` before and after their
 approved work, record that hash in the evidence file, and PASS only that frozen
 candidate. Mixed-hash verdicts or any index drift invalidate all PASS evidence
 for the prior candidate.
+
+The verdict's evidence names the boundary it reviewed, so an audit can separate a
+bounded pass from a sweep:
+
+```text
+DoD checked: B1 pass, B2 pass, A1 noted
+Inspected: {paths read} or diff-plus-call-sites
+```
+
+A verdict without `DoD checked` is incomplete evidence and the controller sends it
+back once. Findings outside the diff's blast radius are `ADVISORY`: listed, never
+re-reviewed, and never the reason for `[CHANGES_REQUIRED]`.
+
+### Verification scope
+
+A verifier assignment is bounded by the change — not by the allowlist, and not by
+the repository. Every Reviewer and Tester assignment carries this block, copied
+from the frozen candidate artifact's `diff --git` lines, never from memory:
+
+```text
+Verification Scope
+Changed files: {n} — {paths introduced by the frozen diff}
+Inspect boundary: those paths, plus call and reference sites reachable from them
+Out of boundary: every other path, repo-wide search, dependency audit, full test suite
+Proof budget: {one named command per BLOCKER criterion | diff inspection only}
+```
+
+- `Allowed files` may be wider than the diff; the changed-file list is what bounds
+  the work. A path nobody changed is out of bounds even when it is allowed.
+- A verifier opens a path outside the list only when a changed symbol calls or is
+  called from it, and names it in `Inspected:` with the criterion that forced it.
+  Anything else is one `ADVISORY` line with `file:line`: recorded, not chased.
+- If a `BLOCKER` criterion cannot be decided inside the boundary, the verifier
+  returns `[STUCK] brief defect: {criterion} needs {path}`. The controller may
+  widen the boundary once with a written reason; a second widening is a Human
+  decision. Widening never becomes "review the module".
+
+A filled-in assignment is in `examples/verifier-assignment.md`; start from it
+rather than writing the envelope from scratch.
 
 Verifier does not silently implement fixes. The assigning controller sends only blocker-backed
 required changes to Worker, then requests a fresh pass from every selected

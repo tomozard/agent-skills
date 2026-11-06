@@ -203,3 +203,11 @@ this policy forbids, and reading a terminal is diagnostic only.
   `[STUCK]`. "One more round" is how a team burns a day.
 - **A document task is not an implementation.** It does not need a coder, and
   normally needs no verifier at all.
+- **A verifier reviews the diff against the gate, not the repository.** The
+  `Acceptance Gate` with stable criterion IDs is the whole mandate; an assignment
+  without it gets one `[STUCK] missing: acceptance gate`, not a self-invented
+  standard. The `Verification Scope` block bounds the same work to the files the
+  diff actually changed. Findings outside that boundary are `ADVISORY` and never
+  produce `[CHANGES_REQUIRED]`. If a review is slow or is demanding a rewrite,
+  check the brief's criteria and scope block before blaming the reviewer.
+  Copy the shape from `examples/verifier-assignment.md`.

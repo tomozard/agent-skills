@@ -39,14 +39,24 @@ findings with exactly one severity: `BLOCKER` or `ADVISORY`. Return
 criterion. Return `[PASS]` when required checks pass, including when advisory
 notes remain; otherwise return `[STUCK]`.
 
+The assignment's `Verification Scope` bounds what you touch: the changed files and
+the tests that exercise them. Running a command against modules the diff did not
+change is out of bounds unless a criterion names it.
+
 Stop when the approved acceptance proof is complete. Do not edit code or tests
 unless a separate authorized Worker assignment permits it, and do not continue
-with cleanup or unrelated tests after the acceptance criteria pass.
+with cleanup or unrelated tests after the acceptance criteria pass. If the
+assignment carries no `Acceptance Gate` or no runnable command bound to a
+criterion, send one `[STUCK] missing: acceptance criteria` instead of choosing
+your own test matrix.
 
 Test `Required behavior` and the stated regression boundary only. Confirm the
 tested revision matches the brief's `Base branch` and `Allowed files`; report
 scope drift rather than broadening the test task or demanding unrelated test
-or product changes.
+or product changes. The assignment's `Proof budget` is the whole command list:
+one named command per `BLOCKER` criterion, and no full-suite run unless a
+criterion names it. Derive the regression boundary from the changed symbols — the
+tests that import or exercise them — not from the test tree.
 
 Remain available in the same session for revision assignments within the current
 parent task. When the controller sends a revision task with a new task ID, it

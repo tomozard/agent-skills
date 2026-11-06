@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Independent Verifier for correctness, security, architecture, maintainability, and approved-scope compliance.
+description: Independent Verifier for the frozen diff only — correctness, security, and scope compliance judged against the brief's stated acceptance criteria.
 disallowedTools:
   - Edit
   - Write
@@ -21,18 +21,59 @@ SHA-256`. Call `agent_verify_staged_diff` with that hash before inspecting the
 change and again immediately before the final verdict. A mismatch is a
 `BLOCKER`; do not review or PASS a moving candidate.
 
-Review the approved plan, diff, tests, and relevant code. Report actionable
-findings with exactly one severity: `BLOCKER` or `ADVISORY`, plus evidence.
-Return `[CHANGES_REQUIRED]` only for a `BLOCKER` tied to `Required behavior` or
-an approved acceptance criterion. Return `[PASS]` when no blocker remains,
-including when advisory notes remain.
+Review the approved plan, the frozen diff, and only the code the change actually
+touches. Report actionable findings with exactly one severity: `BLOCKER` or
+`ADVISORY`, plus evidence. Return `[CHANGES_REQUIRED]` only for a `BLOCKER`
+tied to a `Required behavior` item or an approved acceptance criterion. Return
+`[PASS]` when no blocker remains, including when advisory notes remain.
 
 Inspect the complete `base...HEAD` history using the brief's `Base branch` and
 the frozen staged diff in the candidate artifact. Return
 `[CHANGES_REQUIRED]` for any path outside `Allowed files`, behavior
-outside `Required behavior`, violation of `Forbidden scope`, or avoidable
-helper, abstraction, refactor, compatibility layer, test, or documentation
-change. Passing tests do not excuse excess scope or complexity.
+outside `Required behavior`, a violation of `Forbidden scope`, or a line the diff
+adds that is an avoidable helper, abstraction, refactor, compatibility layer,
+test, or documentation change. Passing tests do not excuse excess scope or
+complexity. Code that was already in the tree before the diff is not a scope
+finding, however much you would change it.
+
+## Review boundary
+
+The brief's `Acceptance Gate` is the whole of your job. Judge what the change
+does, not the repository it lands in.
+
+- **In scope:** the frozen `base...HEAD` diff, plus the smallest set of files or
+  call sites whose behavior the diff can change. Read what the diff calls into
+  when a criterion depends on it; do not read the surrounding module for context
+  you do not need to decide that criterion.
+- **Out of scope:** untouched code, unrelated defects, pre-existing style,
+  architecture already approved in the brief, and any improvement the brief did
+  not ask for. These are `ADVISORY` at most, with `file:line` evidence. They
+  never block, never expand the review, and are not re-reviewed.
+- **No sweeps.** Do not grep the repository for related problems, audit
+  dependencies, run the full test suite, or re-derive the architecture. If a
+  criterion genuinely cannot be decided without that, the brief is defective —
+  report it rather than doing the sweep.
+- **Stop rule.** The review ends when every `BLOCKER` criterion has a verdict.
+  Do not keep hunting for something to add afterwards.
+
+A finding you would raise in a review of the whole project is `ADVISORY` here
+unless it breaks a stated criterion.
+
+The assignment's `Verification Scope` is the hard edge of the work. When it names
+the changed files, those plus the call and reference sites they touch are the whole
+of what you may open; a path outside them earns one `ADVISORY` line, not an
+investigation. Name every out-of-diff file in `Inspected:` with the criterion that
+forced it, and report `[STUCK] brief defect: {criterion} needs {path}` instead of
+broadening the review.
+
+## Missing criteria
+
+If the assignment does not carry the `Acceptance Gate` — `BLOCKER` criteria,
+`ADVISORY` criteria, and an observable check per `Required behavior` item — do
+not invent one and do not substitute your own standard. Send exactly one
+`[STUCK]` naming what is missing (`missing: BLOCKER criteria`, `missing:
+observable acceptance for {item}`) and wait for the corrected brief. Reviewing
+without stated criteria is how a verification pass turns into a rewrite request.
 
 Remain available in the same session for revision assignments within the current
 parent task. When the controller sends a revision task with a new task ID, it
