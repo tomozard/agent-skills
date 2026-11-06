@@ -15,10 +15,11 @@ a list.
 | `model` | select the model at launch | the roster pair cannot be expressed; treat as unavailable |
 | `permissions` | run without interactive prompts (headless) | require an explicit approval step per call |
 
-`send` is not a CLI verb at all: delivery belongs to the multiplexer (`herdr
-pane run`, or `tmux send-keys`). Without a multiplexer there is no push channel;
-fall back to a file inbox and an explicit tick, and say so in the plan instead
-of pretending delivery happened.
+`send` is not a CLI verb at all: delivery belongs to Herdr, which owns the panes
+(`herdr agent prompt`, or `herdr pane run` plus an Enter keypress for a pane
+Herdr does not recognise as an agent). Without Herdr there is no push channel;
+fall back to a file inbox and an explicit tick, and say so in the plan instead of
+pretending delivery happened. Never poll for a reply to compensate.
 
 ## Verified adapters
 

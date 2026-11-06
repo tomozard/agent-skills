@@ -1,6 +1,6 @@
 # Communication Protocol
 
-the runtime sessions are independent processes. A reply written only in the sender's
+Runtime sessions are independent processes. A reply written only in the sender's
 own session is not delivered to the controller. All inter-agent messages must be
 pushed to the target session.
 
@@ -359,6 +359,41 @@ These rules never alter protocol envelopes, state tags, task fields, candidate
 metadata, or authorization tokens. Correctness and protocol fidelity take
 precedence over style.
 
+## Herdr Delivery
+
+Agents are separate processes in Herdr panes, so a message reaches another agent
+only through Herdr. Four command groups cover every case:
+
+| Need | Command | Notes |
+|---|---|---|
+| find the target | `herdr agent list` | agent id, label, metadata, and state; JSON while the server is running |
+| submit a message | `herdr agent prompt <agent> "<text>"` | Herdr's own submit path — it presses Enter for you |
+| submit to a plain pane | `herdr pane run <pane> "<text>"`, then `herdr pane send-keys <pane> enter` | only for a pane Herdr does not recognise as an agent; wait about a second between the two |
+| confirm the target is alive | `herdr agent get <agent>` or `herdr pane get <pane>` | metadata only, never transcript |
+
+What the sender must do:
+
+- **Serialize per target.** Two controllers writing into one pane interleave and
+  the Enter lands on the wrong line. Deliveries to the same target queue; the
+  sending helper serializes them.
+- **File-first for anything long.** Specifications, plans, diffs, commands, and
+  messages over ten lines go to a file, and the message carries only the path.
+- **One message, one purpose.** No retry loops, no duplicate result pings, no
+  probe messages to see whether the other side is awake.
+- **A failed send is `[STUCK]`.** Report it to the controller; do not resend
+  blindly and do not assume the peer received it.
+
+What the sender must never do:
+
+- `herdr agent wait`, `herdr agent prompt --wait`, `herdr pane wait-output` —
+  blocking waits stall a controller and hide a dead pane behind a timeout.
+  Coordination is push-based: the reply arrives as a pushed message.
+- Poll a pane for a reply. Absence of a reply is reported once, not waited on.
+- Use `herdr pane read` as delivery, or as routine monitoring. It is a
+  diagnostic for the role that owns the pane and only after a missing reply,
+  blocked state, failed readiness, or an explicit Human status request.
+- Address a bare `pm` pane when the project has its own `pm-<project>` pane.
+
 ## Envelope
 
 Task:
@@ -490,19 +525,22 @@ references those fields; it does not expand scope or override them.
 
 ## Delivery
 
-Source the helpers once:
+Two shapes, both pushed through Herdr:
 
-```bash
-source ~/.agents/skills/agent-shared/lib/agent-helpers.sh
-```
+| Payload | How |
+|---|---|
+| a short message | `herdr agent prompt <agent> "<text>"` — text and submit in one call |
+| a pane Herdr does not recognise as an agent | `herdr pane run <pane> "<text>"`, then about a second later `herdr pane send-keys <pane> enter` |
 
-Use `send_and_submit` for short messages and `send_file_and_submit` for task
-file handoffs. Delivery is serialized per target session, then uses
-the delivery helper, waits one second, and issues an explicit
-`the delivery helper <session> enter` safeguard. This prevents concurrent
-senders from interleaving text and gives the target TUI time to submit. The
-bounded lock wait never polls the runtime state. Never use raw the delivery helper or
-`send-text` for an inter-agent message.
+Delivery is serialized per target: take the lock, send, wait one second, press
+Enter. The wait gives the target TUI time to submit and stops two senders from
+interleaving their text; the lock wait is bounded and never inspects runtime
+state. Never push a message with raw `herdr pane send-text` — text without a
+submitted Enter sits in the prompt line and looks delivered while nothing ran.
+
+If the shared helpers are installed, `send_and_submit` and `send_file_and_submit`
+wrap exactly that sequence and add the per-target lock. Their exit status is the
+only delivery evidence.
 
 Never send probe text such as `hello`, `test message`, or delivery experiments
 to an agent session. A successful helper exit is the delivery result; a failed
@@ -511,10 +549,11 @@ helper call must be reported as `[STUCK]` through the sender's controller.
 ### Dispatch Records
 
 Controllers keep one local Dispatch Record for every child-task delivery. The
-record must contain the exact `Task ID`, `Target session`, `from`, `to`, intended
-role, and delivery status. The first argument to `send_and_submit` and
-`send_file_and_submit` is the recipient's `Target session`; creating or splitting
-a session does not assign a task to it. Mark the record `status: sent` only after
+record must contain the exact `Task ID`, `Target agent or pane`, `from`, `to`,
+intended role, and delivery status. The first argument to `send_and_submit` and
+`send_file_and_submit` is the recipient's `Target agent or pane`; a pane created
+by `herdr pane split` is not assigned work until a task is delivered to it. Mark
+the record `status: sent` only after
 the helper returns successfully. A failed helper call is a delivery failure,
 not an assumed delivery, and must be escalated as `[STUCK]`.
 
@@ -534,7 +573,7 @@ Normal progress is push-based. Do not block on the runtime state transitions.
 
 If a required reply is missing, the controller may:
 
-1. inspect session metadata with the runtime session command;
+1. inspect agent metadata with `herdr agent get <agent>` (or `herdr pane get <pane>`);
 2. send one `[STATUS_REQ]` message;
 3. inspect the direct report's transcript only when the state is blocked or
    unknown, readiness failed, the status request receives no response, or a

@@ -143,10 +143,18 @@ the weight:
   to the controller — never announced to your own session;
 - a verifier sends exactly one verdict, bound to the diff hash it checked.
 
+Delivery is Herdr's job: `herdr agent prompt <agent> "<text>"` submits a message
+in one call, with `herdr pane run` plus `herdr pane send-keys <pane> enter` as the
+fallback for a pane Herdr does not recognise as an agent. Serialize per target,
+file-first above ten lines, and never wait or poll — `herdr agent wait`,
+`herdr agent prompt --wait`, and `herdr pane wait-output` are blocking commands
+this policy forbids, and pane reads are diagnostic only.
+
 ## What is not included
 
-- Spawning, panes, and multiplexer plumbing. Use your runtime's own spawn
-  primitive; the shape tells you which roles to start.
+- Spawning and pane layout. The launcher starts roles and owns the topology;
+  delivery into a running agent is Herdr's (`herdr agent prompt`), and the exact
+  commands and prohibitions are in the protocol.
 - Launching. `scripts/roster` resolves role and tier to one runtime/model pair
   from `examples/team.json`'s schema (`model_selection`, ordered allowlists,
   per-tier `primary`/`alternates`), and `scripts/runtime-probe` reports what the

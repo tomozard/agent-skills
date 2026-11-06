@@ -95,10 +95,10 @@ the authorized commit and mechanical integrity check succeed.
 
 Treat every child-task delivery as a stateful dispatch. Before sending a task,
 record a Dispatch Record in the task's execution notes with the exact `Task ID`,
-`Target session`, `from`, `to`, and intended role. The first argument to
-`send_and_submit` and `send_file_and_submit` is always the recipient's target
-session; a session created by `split` is not assigned work until the helper is called
-with that session as the target. After delivery, record `status: sent` only when
+`Target agent or pane`, `from`, `to`, and intended role. The first argument to
+`send_and_submit` and `send_file_and_submit` is always the recipient's target; a
+pane created by `herdr pane split` is not assigned work until a task is delivered
+to it. After delivery, record `status: sent` only when
 the helper returns successfully; a failed helper call is a delivery failure
 and must be escalated as `[STUCK]`.
 
@@ -282,14 +282,14 @@ somewhere else.
 You may inspect only your Planner agents, Supervisor, and approved direct
 Documenter/Worker/Verifier agents under the diagnostic
 conditions in `AGENTS.md`. Never block on the runtime state or poll. Do not run
-`sleep` or any delayed shell loop before the runtime session command, the runtime session command,
-the runtime session command, or the delivery helper. After assigning work, return
+`sleep` or any delayed shell loop before `herdr agent get`, `herdr agent read`, or a
+delivery. After assigning work, return
 control to the Human-facing conversation and wait for the child agent to push
 `[ACK]`, `[DONE]`, or `[STUCK]`.
 
 ## Forbidden Actions and Required Alternatives
 
-- Do not use `sleep`, `while`, repeated shell commands, or repeated the runtime session
+- Do not use `sleep`, `while`, repeated shell commands, or repeated `herdr agent get`
   metadata reads to wait for child progress. Instead, send the task once with
   the shared helper and wait for the child to push the next protocol message.
 - Do not run repository verification, `git show`, test commands, or file

@@ -16,7 +16,9 @@ reporting after PM handoff.
 At startup, read the team policy documents and shared helper skills,
 and `~/.agents/protocols/communication.md`. Source the shared helper library.
 Use `send_and_submit` or `send_file_and_submit` for every inter-agent message.
-Never call raw the delivery helper or `send-text` for inter-agent delivery.
+Never call `herdr pane run` or `herdr pane send-text` directly for an
+inter-agent message; the shared helper owns the per-target lock and the Enter
+safeguard.
 
 ## Startup Handshake
 
@@ -152,7 +154,7 @@ access is diagnostic only under `AGENTS.md`; never block or poll.
 - Do not remain in `working` state to wait for PM readiness, queued prompts, or
   future Human input. Report the current bootstrap state in Thai and stop the
   turn so the runtime returns to idle.
-- Do not use `sleep`, `while`, repeated shell commands, repeated the runtime session
+- Do not use `sleep`, `while`, repeated shell commands, repeated `herdr agent get`
   metadata reads, or repeated PM transcript reads. Bootstrap readiness is
   push-based through one `[ACK]` or startup `[STUCK]`.
 - Do not attempt to drain, optimize, edit, reorder, or answer all queued Human

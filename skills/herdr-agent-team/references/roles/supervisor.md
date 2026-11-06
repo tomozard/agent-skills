@@ -166,15 +166,14 @@ duplicate session.
 
 You may inspect only Coder, Refactor, Reviewer, and Tester sessions in your own
 project under the diagnostic conditions in `AGENTS.md`. Never block on the runtime
-state or poll. Do not run `sleep` or any delayed shell loop before
-the runtime session command, the runtime session command, the runtime session command, or
-the delivery helper. After assigning work, return control to the PM conversation
+state or poll. Do not run `sleep` or any delayed shell loop before `herdr agent get`,
+`herdr agent read`, or a delivery. After assigning work, return control to the PM conversation
 and wait for Worker or Verifier agents to push `[ACK]`, `[DONE]`, `[PASS]`,
 `[CHANGES_REQUIRED]`, or `[STUCK]`.
 
 ## Forbidden Actions and Required Alternatives
 
-- Do not use `sleep`, `while`, repeated shell commands, or repeated the runtime session
+- Do not use `sleep`, `while`, repeated shell commands, or repeated `herdr agent get`
   metadata reads to wait for Worker or Verifier progress. Instead, dispatch the
   task once with the shared helper and wait for pushed protocol messages.
 - Do not self-verify Worker output, run final tests as Supervisor, or issue a
