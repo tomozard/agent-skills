@@ -91,6 +91,29 @@ Supervisor knows which frozen candidate to execute. Do not inspect or mutate
 the repository, commit as PM, or accept a Worker or Supervisor `[DONE]` before
 the authorized commit and mechanical integrity check succeed.
 
+## Staffing Economy
+
+Cheap is not careless. Score an assignment on its blast radius, and let the
+mechanical gates — staged-diff SHA-256, Allowed files, commit gate, post-commit
+integrity check — carry the quality, because they behave the same on any model.
+
+- **Micro-config** (CI/CD file, pinned variable, dead workflow file, ≤ ~5 changed
+  lines, no application or runtime behaviour): score `risk: low|medium`, resolve
+  it `standard`, and staff **one** Verifier. Do not add a Tester, and do not
+  score it `critical` because the file happens to be infrastructure.
+- **Repetition**: when the same edit repeats across repositories, walk them in
+  one Coder session instead of spawning a Coder per repository. Parallel Coders
+  are fine only while each owns its worktree.
+- **Deterministic lane**: a literal edit the Human spelled out may run as
+  `W2-micro`, where the Task Board proof replaces a model Verifier. Never for
+  anything the Human did not state explicitly.
+- **Critical stays for judgement** — logic, security, payments, migrations,
+  cross-file behaviour, destructive data changes — not for ceremony.
+
+Record the lane and one line of why in the `Task Tier Assessment`. A high tier
+for a one-line config edit is a policy error, not diligence; if you notice one
+after the fact, say so and correct the next dispatch instead of defending it.
+
 ## Dispatch Accounting and Unexpected Replies
 
 Treat every child-task delivery as a stateful dispatch. Before sending a task,

@@ -70,6 +70,29 @@ A third middle tier is intentionally absent: standard models now carry general
 work, so an extra tier only added routing ambiguity. If a project still runs
 three tiers, map `easy`+`advanced` to `standard` before adopting these scripts.
 
+### Micro-config lane (default for repetitive config work)
+
+Score a change on its blast radius, not on the subject it mentions. A change
+that only edits configuration — a CI/CD file, a pinned variable, deleting a dead
+workflow file, ≤ ~5 changed lines, no application or runtime behaviour — is
+`risk: low|medium`, resolves `standard`, and runs on the `pi` primary with
+**one** independent verifier. It is not `critical` just because the file lives
+in CI or touches infrastructure: `critical` is reserved for decisions that need
+judgement (logic, security, payments, migrations, cross-file behaviour,
+destructive data changes).
+
+Repetition has two cheaper shapes and both are expected:
+
+- **One Coder, several repositories** — one session walks the repositories in
+  sequence; parallel Coders are allowed only while each owns its worktree.
+- **Deterministic lane (`W2-micro`)** — a literal edit the Human spelled out may
+  rely on the Task Board proof (hash, Allowed files, commit gate) instead of a
+  model verifier. Never for anything the Human did not state explicitly.
+
+The mechanical guarantees are what produce quality here; they cost the same on a
+cheap model. A high-tier writer for a one-line config edit is a policy error,
+and the intake should be scored so the resolver cannot return one.
+
 ## Wiring it to a runtime
 
 `scripts/workflow-shape` answers "who should work on this". Enforcement lives in
