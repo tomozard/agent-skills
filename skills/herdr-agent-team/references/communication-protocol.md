@@ -88,40 +88,36 @@ approval; it does not create a separate Human approval round. `Model budget`
 records cost intent but must never downgrade the primary required by the
 evaluated tier.
 
-PM is fixed: Orchestrator does not score or pass a task tier for it. Record
-`Runtime: pi`, `Model: opencode-go/deepseek-v4.1-flash`, and `Routing: fixed`, then
-call the spawn helper without tier routing arguments.
+PM is fixed: Orchestrator does not score or pass a task tier for it. Record the
+pair `scripts/roster pm standard` prints (`Runtime`, `Model`, `Routing: fixed`),
+then call the spawn helper without tier routing arguments.
 
 Designer is fixed rather than controller-selected. PM does not score or pass a
-task tier for Designer; it records `Runtime: claude`, `Model: opus`, and
-`Routing: fixed`, then lets the spawn helper resolve that sole configured pair.
+task tier for Designer; it records the pair the roster resolves for that role and
+lets the spawn helper use it unchanged.
 
-Model tier routing:
+Model routing is a lookup, not a table to memorise:
 
-| Role | Easy | Advanced | Critical |
-|---|---|---|---|
-| PM (fixed) | Fixed: Pi / `opencode-go/deepseek-v4.1-flash` | Fixed: Pi / `opencode-go/deepseek-v4.1-flash` | Fixed: Pi / `opencode-go/deepseek-v4.1-flash` |
-| SA | Pi / `alibaba-token-intl/qwen3.8-max` | Pi / `antigravity/gemini-3.8-flash` | Claude / `opus` |
-| Investigator | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Claude / `opus` |
-| Researcher | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` |
-| Designer (fixed) | Fixed: Claude / `opus` | Fixed: Claude / `opus` | Fixed: Claude / `opus` |
-| Supervisor | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` |
-| Coder | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Claude / `opus` |
-| Refactor | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `antigravity/gemini-3.8-flash` | Claude / `opus` |
-| Reviewer | Pi / `antigravity/gemini-3.8-flash` | Pi / `alibaba-token-intl/qwen3.8-max` | Claude / `opus` |
-| Tester | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `antigravity/gemini-3.8-flash` | Claude / `sonnet` |
-| Documenter | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` |
+```bash
+./scripts/roster <role> <standard|critical>
+```
 
-This table is a human-readable view of the primary routes; `.agents/team.json`
-is authoritative. Orchestrator is fixed to Pi / `antigravity/gemini-3.8-flash`,
-PM to Pi / `opencode-go/deepseek-v4.1-flash`, and Designer to Claude / `opus`;
-none of them has task-tier routing. Reviewer and Tester carry explicit
-alternates so a writer never verifies itself; those are the only configured
-alternates, so a disabled primary is `[STUCK]` unless its own tier lists an
-enabled alternate. A controller may
-use only a configured alternate for the evaluated tier and must mark the
-exception explicitly; it must not choose any other pair or switch after
-launch.
+The roster file (`examples/team.json` shows the schema) is the only source of
+model identifiers; `scripts/roster` returns the first pair for that tier that is
+installed, allowlisted for its runtime, and not from a disabled provider, and
+prints why each earlier candidate was rejected. Characteristics:
+
+- `model_selection: fixed` roles (orchestrator, PM, designer) resolve one pair
+  and are launched without `--task-tier`.
+- `model_selection: controller` roles resolve `routing[<tier>].primary`, falling
+  to that tier's `alternates` only. An alternate is recorded as a routing
+  exception with its reason; no other pair may be substituted.
+- Reviewer and Tester carry alternates so a writer never verifies its own work.
+- No usable pair is `[STUCK]`. Never pick a model from another tier, another
+  provider, or by normalising a name to make a launch succeed.
+- Runtime availability comes from `scripts/runtime-probe`; see
+  `references/runtime-adapters.md` for the verbs each CLI must support and the
+  degraded mode when one is missing.
 
 ## Scope Lock
 

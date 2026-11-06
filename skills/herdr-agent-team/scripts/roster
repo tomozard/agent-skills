@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+
+"""Resolve one role and task tier to the exact runtime and model to launch.
+
+The roster file (default `.agents/team.json`) is the only source of model
+identifiers: this script never invents, normalizes, or substitutes one. It walks
+the configured candidates in order and returns the first pair whose runtime
+exists on this machine, whose model is on that runtime's allowlist, and whose
+provider is not disabled. Nothing usable is `[STUCK]` (exit 3), not a guess.
+
+usage: roster [--team FILE] [--json] [--path DIR] ROLE TIER
+"""
+
+import argparse
+import json
+import os
+import shutil
+import sys
+
+TIERS = ("standard", "critical")
+RETIRED = {"easy": "standard", "advanced": "critical"}
+
+
+def die(message, code=2):
+    print(f"roster: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def load_team(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        die(f"no roster file at {path}", 2)
+    except json.JSONDecodeError as error:
+        die(f"{path} is not valid JSON: {error}", 2)
+
+
+def available(runtime, search_path):
+    return shutil.which(runtime, path=search_path) is not None
+
+
+def candidates_for(team, role, tier):
+    selection = role.get("model_selection")
+    if selection == "fixed":
+        models = role.get("models") or {}
+        for runtime in team.get("runtime_order") or list(models):
+            if runtime in models and models[runtime]:
+                model = role.get("default_model")
+                if not model or model not in models[runtime]:
+                    model = models[runtime][0]
+                return [{"runtime": runtime, "model": model, "selection": "fixed",
+                         "source": f"roles.{role['_name']}.models.{runtime}"}]
+        return []
+    route = (role.get("routing") or {}).get(tier)
+    if not route:
+        return []
+    out = []
+    primary = route.get("primary") or {}
+    if primary:
+        out.append({"runtime": primary.get("runtime"), "model": primary.get("model"),
+                    "selection": "primary",
+                    "source": f"roles.{role['_name']}.routing.{tier}.primary"})
+    for index, alternate in enumerate(route.get("alternates") or [], start=1):
+        out.append({"runtime": alternate.get("runtime"), "model": alternate.get("model"),
+                    "selection": "alternate",
+                    "source": f"roles.{role['_name']}.routing.{tier}.alternates[{index - 1}]"})
+    return out
+
+
+def rejected_reason(team, candidate, search_path):
+    runtime, model = candidate["runtime"], candidate["model"]
+    if not runtime or not model:
+        return "incomplete pair in the roster"
+    models = (team.get("roles") or {}).get(candidate.get("role")) or {}
+    allow = (models.get("models") or {})
+    if runtime not in allow or model not in (allow.get(runtime) or []):
+        return f"{runtime}/{model} is not on that runtime's allowlist"
+    for provider in team.get("disabled_model_providers") or []:
+        if model.startswith(f"{provider}/"):
+            return f"provider {provider} is disabled"
+    if not available(runtime, search_path):
+        return f"runtime {runtime} is not installed"
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument("--team", default=os.environ.get("TEAM_ROSTER", ".agents/team.json"))
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--path", default=os.environ.get("PATH", ""))
+    parser.add_argument("role")
+    parser.add_argument("tier")
+    args = parser.parse_args()
+
+    tier = args.tier.lower()
+    if tier in RETIRED:
+        die(f"tier '{args.tier}' was retired; use '{RETIRED[tier]}'", 2)
+    if tier not in TIERS:
+        die(f"unknown tier '{args.tier}' (expected standard or critical)", 2)
+
+    team = load_team(args.team)
+    roles = team.get("roles") or {}
+    role = roles.get(args.role)
+    if not role:
+        die(f"role '{args.role}' is not in {args.team}", 2)
+    role = dict(role)
+    role["_name"] = args.role
+
+    rejected = []
+    for candidate in candidates_for(team, role, tier):
+        enriched = dict(candidate, role=args.role)
+        reason = rejected_reason(team, enriched, args.path)
+        if reason is None:
+            result = {
+                "role": args.role,
+                "tier": tier,
+                "runtime": candidate["runtime"],
+                "model": candidate["model"],
+                "selection": candidate["selection"],
+                "source": candidate["source"],
+                "rejected": rejected,
+            }
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"role       {result['role']}")
+                print(f"tier       {result['tier']}")
+                print(f"runtime    {result['runtime']}")
+                print(f"model      {result['model']}")
+                print(f"selection  {result['selection']}")
+                print(f"source     {result['source']}")
+                for item in rejected:
+                    print(f"rejected   {item['runtime']}/{item['model']} — {item['reason']}")
+                print("")
+                print(f"launch: --runtime {result['runtime']} --model {result['model']} --task-tier {tier}")
+            return 0
+        rejected.append({"runtime": candidate["runtime"], "model": candidate["model"],
+                         "reason": reason})
+
+    if args.json:
+        print(json.dumps({"role": args.role, "tier": tier, "stuck": True,
+                          "rejected": rejected}, indent=2))
+    else:
+        print(f"[STUCK] no launchable pair for role {args.role} in tier {tier}")
+        for item in rejected:
+            print(f"  {item['runtime']}/{item['model']} — {item['reason']}")
+        if not rejected:
+            print(f"  the roster declares no route for {args.role} in tier {tier}")
+        print("  add an available runtime/model to the roster; do not invent one")
+    return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())

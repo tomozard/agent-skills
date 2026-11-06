@@ -101,10 +101,10 @@ the policy-defined selection and launch without tier routing:
 ```text
 Model Selection:
 Role: pm
-Runtime: pi
-Model: opencode-go/deepseek-v4.1-flash
+Runtime: {from the roster}
+Model: {from the roster}
 Routing: fixed
-Reason: policy-defined fixed PM pair
+Reason: policy-defined fixed PM pair; no scoring, no substitution
 ```
 
 Call the spawn helper without tier routing: pass no `--task-tier`,

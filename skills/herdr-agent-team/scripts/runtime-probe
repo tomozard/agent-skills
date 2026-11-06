@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+
+# Report which agent CLIs this machine has, and which verbs each one actually
+# supports.
+#
+# Read-only by construction: it checks `command -v`, reads `<cli> --version`,
+# and greps the CLI's own help text. It never logs in, never reads credentials,
+# and never runs a prompt. A verb is reported true only when the help output
+# advertises it, so a CLI upgrade that renames a flag shows up here instead of
+# in a failed spawn.
+
+set -u
+
+JSON=0
+for arg in "$@"; do
+  case "$arg" in
+    --json) JSON=1 ;;
+    -h|--help) printf 'usage: runtime-probe [--json]\n'; exit 0 ;;
+    *) printf 'runtime-probe: unknown argument %s\n' "$arg" >&2; exit 2 ;;
+  esac
+done
+
+RUNTIMES="pi hermes codex claude opencode kiro-cli"
+
+help_text() {
+  case "$1" in
+    codex) "$1" exec --help 2>&1 ;;
+    opencode) "$1" run --help 2>&1 ;;
+    kiro-cli) "$1" chat --help 2>&1 ;;
+    *) "$1" --help 2>&1 ;;
+  esac
+}
+
+has() { # has <extended-regex> <text>
+  printf '%s' "$2" | grep -Eqi -- "$1"
+}
+
+version_of() {
+  "$1" --version 2>&1 | head -1 | tr -d '\r'
+}
+
+json_bool() { if [ "$1" = "yes" ]; then printf 'true'; else printf 'false'; fi; }
+
+if [ "$JSON" = "1" ]; then
+  printf '{"version":1,"transport":{'
+  sep=""
+  for transport in herdr tmux; do
+    if command -v "$transport" >/dev/null 2>&1; then state=true; else state=false; fi
+    printf '%s"%s":%s' "$sep" "$transport" "$state"
+    sep=","
+  done
+  printf '},"runtimes":{'
+  sep=""
+else
+  printf '%-9s %-21s %-5s %-6s %-7s %-7s %-6s\n' runtime version found ask model system resume
+fi
+
+for runtime in $RUNTIMES; do
+  if command -v "$runtime" >/dev/null 2>&1; then
+    available=yes
+    version="$(version_of "$runtime")"
+    help="$(help_text "$runtime")"
+    case "$runtime" in
+      pi) ask_re='--print|-p\b' ;;
+      hermes) ask_re='--oneshot|-z\b' ;;
+      codex) ask_re='Usage:.*exec' ;;
+      claude) ask_re='--print|-p\b' ;;
+      opencode) ask_re='^ *run\b' ;;
+      kiro-cli) ask_re='--no-interactive' ;;
+    esac
+    if has "$ask_re" "$help"; then ask=yes; else ask=no; fi
+    if has '(^|[[:space:]])(--model|-m)([[:space:]]|,|=|>|$)' "$help"; then model=yes; else model=no; fi
+    if has '--system-prompt|--append-system-prompt|--agent' "$help"; then system=yes; else system=no; fi
+    if has '--resume|--session|--continue|^ *resume' "$help"; then resume=yes; else resume=no; fi
+    if has '--dangerously-skip-permissions|--full-auto|--sandbox|--auto-approve|--trust-all-tools|--yes\b' "$help"; then perms=yes; else perms=no; fi
+  else
+    available=no; version=""; ask=no; model=no; system=no; resume=no; perms=no
+  fi
+
+  if [ "$JSON" = "1" ]; then
+    printf '%s"%s":{"available":%s,"version":"%s","verbs":{"ask":%s,"model":%s,"system":%s,"resume":%s,"permissions":%s}}' \
+      "$sep" "$runtime" "$(json_bool "$available")" "$version" \
+      "$(json_bool "$ask")" "$(json_bool "$model")" "$(json_bool "$system")" \
+      "$(json_bool "$resume")" "$(json_bool "$perms")"
+    sep=","
+  else
+    printf '%-9s %-21s %-5s %-6s %-7s %-7s %-6s\n' \
+      "$runtime" "${version:0:20}" "$available" "$ask" "$model" "$system" "$resume"
+  fi
+done
+
+if [ "$JSON" = "1" ]; then
+  printf '}}\n'
+  exit 0
+fi
+
+printf '\nask = non-interactive one-shot; permissions is per-runtime\n'
+printf 'pi: -p --model --system-prompt | hermes: -z -m --provider\n'
+printf 'codex: exec -m --full-auto | claude: -p --model --append-system-prompt --dangerously-skip-permissions\n'
+printf 'opencode: run -m --agent | kiro-cli: chat --no-interactive --model --trust-all-tools\n'

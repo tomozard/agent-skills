@@ -113,6 +113,25 @@ gates and reporting; specialists execute and are leaves. Keep exactly one PM per
 project — a second one splits the Human conversation and fights over the same
 work.
 
+## Runtimes
+
+Nothing here is tied to one CLI. A machine may have `pi`, `hermes`, `codex`,
+`claude`, `opencode`, or `kiro-cli` — or only one of them — and the team still
+works because a runtime is judged by verbs, not by name:
+
+```bash
+./scripts/runtime-probe          # what this machine has, and what each CLI can do
+./scripts/roster coder critical  # role + tier -> runtime, model, selection, source
+```
+
+`references/runtime-adapters.md` records the six verbs (`launch`, `ask`, `send`,
+`resume`, `model`, `permissions`), the verified invocation for each CLI, and the
+degraded mode when a verb is missing. `roster` never invents a model: a pair that
+is uninstalled, disabled, or off the allowlist is refused, and an empty result is
+`[STUCK]` rather than a substitution. Neither script installs a CLI, logs in, or
+reads a credential. `bash tests/runtime.test.sh` exercises both against fake
+runtime binaries, offline.
+
 ## Communication
 
 `references/communication-protocol.md` is the full contract: envelope, ACK /
@@ -128,9 +147,11 @@ the weight:
 
 - Spawning, panes, and multiplexer plumbing. Use your runtime's own spawn
   primitive; the shape tells you which roles to start.
-- Model routing enforcement. `examples/team.json` shows the expected schema
-  (`model_selection`, ordered allowlists, per-tier `primary`/`alternates`); your
-  launcher is what enforces it.
+- Launching. `scripts/roster` resolves role and tier to one runtime/model pair
+  from `examples/team.json`'s schema (`model_selection`, ordered allowlists,
+  per-tier `primary`/`alternates`), and `scripts/runtime-probe` reports what the
+  machine has — but the spawn command, panes, and enforcement of the result stay
+  with your launcher.
 - Trackers and issue sync. Intake is a file here; wire it to whatever tracker you
   use and keep the same shape.
 
