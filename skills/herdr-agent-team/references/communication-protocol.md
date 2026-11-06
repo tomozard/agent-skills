@@ -359,23 +359,32 @@ These rules never alter protocol envelopes, state tags, task fields, candidate
 metadata, or authorization tokens. Correctness and protocol fidelity take
 precedence over style.
 
-## Herdr Delivery
+## Delivery (Herdr)
 
-Agents are separate processes in Herdr panes, so a message reaches another agent
-only through Herdr. Four command groups cover every case:
+Two Herdr runtimes host this protocol, and the transport differs because the
+terminals do:
 
-| Need | Command | Notes |
-|---|---|---|
-| find the target | `herdr agent list` | agent id, label, metadata, and state; JSON while the server is running |
-| submit a message | `herdr agent prompt <agent> "<text>"` | Herdr's own submit path — it presses Enter for you |
-| submit to a plain pane | `herdr pane run <pane> "<text>"`, then `herdr pane send-keys <pane> enter` | only for a pane Herdr does not recognise as an agent; wait about a second between the two |
-| confirm the target is alive | `herdr agent get <agent>` or `herdr pane get <pane>` | metadata only, never transcript |
+| Runtime | Find the target | Deliver | Read (diagnostic only) |
+|---|---|---|---|
+| Herdr app (`herdr-core` / `hc`) | `hc ls` | `hc send <terminal> "<text>"` — pastes the text and presses Enter | `hc read <terminal> --lines <n>` |
+| Herdr terminal CLI (`herdr`) | `herdr agent list` | `herdr agent prompt <agent> "<text>"`; fallback `herdr pane run <pane> "<text>"` then `herdr pane send-keys <pane> enter` | `herdr agent read <agent>` or `herdr pane read <pane>` |
+
+Layout is not `hc`'s job: in the app runtime, spaces, tabs, and splits come from
+`herdr-app do …` (`tab.new`, `pane.split`, `ls`), while `hc` owns the terminals.
+A child role is `hc run --bg --parent <controller>` and ends with its controller
+unless it was started `--outlive-parent`.
+
+Delivery is serialized per target: take the lock, send, wait one second, press
+Enter — the CLI fallback spells that out as two calls, `hc send` does both. The
+wait gives the target TUI time to submit and stops two senders from interleaving
+their text; the lock wait is bounded and never inspects runtime state. Never push
+a message with raw `herdr pane send-text` (or bare `hc keys`): text without a
+submitted Enter sits in the prompt line and looks delivered while nothing ran.
 
 What the sender must do:
 
-- **Serialize per target.** Two controllers writing into one pane interleave and
-  the Enter lands on the wrong line. Deliveries to the same target queue; the
-  sending helper serializes them.
+- **Serialize per target.** Two controllers writing into one terminal interleave
+  and the Enter lands on the wrong line. Deliveries to the same target queue.
 - **File-first for anything long.** Specifications, plans, diffs, commands, and
   messages over ten lines go to a file, and the message carries only the path.
 - **One message, one purpose.** No retry loops, no duplicate result pings, no
@@ -385,13 +394,16 @@ What the sender must do:
 
 What the sender must never do:
 
-- `herdr agent wait`, `herdr agent prompt --wait`, `herdr pane wait-output` —
-  blocking waits stall a controller and hide a dead pane behind a timeout.
-  Coordination is push-based: the reply arrives as a pushed message.
-- Poll a pane for a reply. Absence of a reply is reported once, not waited on.
-- Use `herdr pane read` as delivery, or as routine monitoring. It is a
-  diagnostic for the role that owns the pane and only after a missing reply,
-  blocked state, failed readiness, or an explicit Human status request.
+- `hc wait` (including `--children`), `herdr agent wait`, `herdr agent prompt
+  --wait`, `herdr pane wait-output` — blocking waits stall a controller and hide a
+  dead terminal behind a timeout. herdr-core's own model is a synchronous wait,
+  but a controller turn that blocks cannot report to its Human; rely on the notes
+  hc types into the parent terminal (`--no-notify` turns them off) and on pushed
+  protocol messages instead.
+- Poll a terminal for a reply. Absence of a reply is reported once, not waited on.
+- Use `hc read` or `herdr pane read` as delivery, or as routine monitoring. It is
+  a diagnostic for the role that owns the terminal, and only after a missing
+  reply, blocked state, failed readiness, or an explicit Human status request.
 - Address a bare `pm` pane when the project has its own `pm-<project>` pane.
 
 ## Envelope
@@ -523,27 +535,8 @@ Keep the task's `Operation`, branch, allowlist, behavior, staffing, model, and
 verification fields authoritative. The context block summarizes progress and
 references those fields; it does not expand scope or override them.
 
-## Delivery
-
-Two shapes, both pushed through Herdr:
-
-| Payload | How |
-|---|---|
-| a short message | `herdr agent prompt <agent> "<text>"` — text and submit in one call |
-| a pane Herdr does not recognise as an agent | `herdr pane run <pane> "<text>"`, then about a second later `herdr pane send-keys <pane> enter` |
-
-Delivery is serialized per target: take the lock, send, wait one second, press
-Enter. The wait gives the target TUI time to submit and stops two senders from
-interleaving their text; the lock wait is bounded and never inspects runtime
-state. Never push a message with raw `herdr pane send-text` — text without a
-submitted Enter sits in the prompt line and looks delivered while nothing ran.
-
-If the shared helpers are installed, `send_and_submit` and `send_file_and_submit`
-wrap exactly that sequence and add the per-target lock. Their exit status is the
-only delivery evidence.
-
 Never send probe text such as `hello`, `test message`, or delivery experiments
-to an agent session. A successful helper exit is the delivery result; a failed
+to an agent terminal. A successful helper exit is the delivery result; a failed
 helper call must be reported as `[STUCK]` through the sender's controller.
 
 ### Dispatch Records

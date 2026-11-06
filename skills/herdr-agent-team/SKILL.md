@@ -143,12 +143,14 @@ the weight:
   to the controller — never announced to your own session;
 - a verifier sends exactly one verdict, bound to the diff hash it checked.
 
-Delivery is Herdr's job: `herdr agent prompt <agent> "<text>"` submits a message
-in one call, with `herdr pane run` plus `herdr pane send-keys <pane> enter` as the
-fallback for a pane Herdr does not recognise as an agent. Serialize per target,
-file-first above ten lines, and never wait or poll — `herdr agent wait`,
+Delivery is Herdr's job. In the Herdr app (herdr-core) a message is
+`hc send <terminal> "<text>"`; with the terminal CLI it is
+`herdr agent prompt <agent> "<text>"`, falling back to `herdr pane run` plus
+`herdr pane send-keys <pane> enter`. Children are `hc run --bg --parent`, while
+spaces, tabs, and splits belong to `herdr-app do …`. Serialize per target,
+file-first above ten lines, and never wait or poll — `hc wait`, `herdr agent wait`,
 `herdr agent prompt --wait`, and `herdr pane wait-output` are blocking commands
-this policy forbids, and pane reads are diagnostic only.
+this policy forbids, and reading a terminal is diagnostic only.
 
 ## What is not included
 

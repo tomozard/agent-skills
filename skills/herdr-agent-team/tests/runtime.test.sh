@@ -77,7 +77,7 @@ json_field() { # json_field <key> <json on stdin>
 import json, sys
 data = json.load(sys.stdin)
 assert data["version"] == 1, data
-assert set(data["transport"]) == {"herdr"}, data["transport"]
+assert set(data["transport"]) == {"herdr", "hc", "herdr-app"}, data["transport"]
 assert set(data["runtimes"]) == {"pi", "hermes", "codex", "claude", "opencode", "kiro-cli"}, data
 assert all(set(v["verbs"]) == {"ask", "model", "system", "resume", "permissions"}
            for v in data["runtimes"].values()), data

@@ -43,8 +43,12 @@ json_bool() { if [ "$1" = "yes" ]; then printf 'true'; else printf 'false'; fi; 
 
 if [ "$JSON" = "1" ]; then
   printf '{"version":1,"transport":{'
-  if command -v herdr >/dev/null 2>&1; then state=true; else state=false; fi
-  printf '"herdr":%s' "$state"
+  sep=""
+  for transport in herdr hc herdr-app; do
+    if command -v "$transport" >/dev/null 2>&1; then state=true; else state=false; fi
+    printf '%s"%s":%s' "$sep" "$transport" "$state"
+    sep=","
+  done
   printf '},"runtimes":{'
   sep=""
 else
