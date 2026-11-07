@@ -157,6 +157,11 @@ Rules that follow from it:
   never loop, never read a child's pane to check progress: each poll costs a
   turn, fills the controller's context with another agent's screen, and tells you
   less than the message the child was going to send anyway.
+- **Inspect on request, not on a schedule.** Reading a child's pane is allowed
+  when the Human asks for it, or for one diagnostic check after a report was due
+  and did not arrive (or the child reports itself blocked). Never as a progress
+  bar — "let me see how it is going" is the signal to wait or to ask the Human,
+  not to read the pane.
 
 ## Dispatch Accounting and Unexpected Replies
 
