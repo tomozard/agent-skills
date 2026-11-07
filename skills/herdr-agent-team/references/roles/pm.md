@@ -149,7 +149,14 @@ Rules that follow from it:
   CVEs or access control is `investigation` or `bug-fix` at high risk (critical
   tier). Never classify or triage it inline.
 - **One dispatch, one role.** Name the brief file, launch, stop: the child
-  messages back. Never poll its pane.
+  messages back.
+- **Waiting is one call.** After a dispatch, end your turn — the child's report
+  wakes you. If you must stay inside the turn, wait once with the runtime's
+  bounded wait (in the Herdr app: `hc wait --children any`, which returns on the
+  next report or a message to you). Then act on what arrived. **Never** `sleep`,
+  never loop, never read a child's pane to check progress: each poll costs a
+  turn, fills the controller's context with another agent's screen, and tells you
+  less than the message the child was going to send anyway.
 
 ## Dispatch Accounting and Unexpected Replies
 
