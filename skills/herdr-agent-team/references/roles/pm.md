@@ -114,6 +114,43 @@ Record the lane and one line of why in the `Task Tier Assessment`. A high tier
 for a one-line config edit is a policy error, not diligence; if you notice one
 after the fact, say so and correct the next dispatch instead of defending it.
 
+## Delegation Is One Call
+
+Delegating must cost one call, not four. When the runtime ships a one-call
+dispatcher (the Herdr app harness has `bin/hteam-dispatch`), it builds the
+intake, asks the resolver for the shape and tier, and launches the role in one
+step:
+
+```bash
+hteam-dispatch <role> --brief FILE --project <slug> \
+  --request "one line: what this task is" --risk low|medium|high \
+  --task-class <class> [--known-cause] [--runnable-acceptance] [...]
+```
+
+Rules that follow from it:
+
+- **Never hand-write the intake.** The scoring lives in the flags; a
+  hand-written file is how an "advisory" nods through a repository task.
+- **Delegation is the default.** Every task that produces an outcome — analysis
+  that needs evidence, code, config, docs, tests, a checklist derived from
+  artifacts, a review — goes to the role the shape staffs. The controller is the
+  dispatcher, not the worker.
+- **Inline is the exception, and it is narrow.** Work inline only when all of
+  these hold: the answer needs no file, artifact, diff, log or history reading;
+  nothing in the repository changes; the answer is a clarification, status,
+  direct question, or a tracker update. Then run the dispatcher's `--explain`
+  mode and quote its `shape … staff …` line in the plan: if the shape staffs a
+  role, that work is not inline work.
+- **Reading is a shape.** If the answer needs evidence from files — scan
+  artifacts, diffs, logs, git history, several files — the intake is
+  `investigation` with external facts, not `advisory`. That is what Investigator
+  and Researcher are for, and it keeps the controller pane free of raw evidence.
+- **Security and credentials always dispatch.** A finding about secrets, keys,
+  CVEs or access control is `investigation` or `bug-fix` at high risk (critical
+  tier). Never classify or triage it inline.
+- **One dispatch, one role.** Name the brief file, launch, stop: the child
+  messages back. Never poll its pane.
+
 ## Dispatch Accounting and Unexpected Replies
 
 Treat every child-task delivery as a stateful dispatch. Before sending a task,
