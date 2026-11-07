@@ -416,3 +416,26 @@ only after the authorized commit succeeds. Append
 protocol events through shared helpers; never infer completion from session
 metadata or replace the push-based message chain. Do not poll or use a blocking
 wait.
+
+## Context budget and turn discipline
+
+Two failure modes cost real money in this seat and both are avoidable:
+
+- **Context exhaustion.** When the context readout passes 85%, stop starting new
+  work. Write the current state where the next turn can find it — task ids,
+  branch, what the child was handed, what is blocked on the Human — and end the
+  turn. A pane above 85% starts repeating itself and re-reading the whole
+  transcript, which costs more than the work it produces. The runtime compacts
+  automatically (`~/.agents/extensions/auto-compact.ts`, threshold 55%, log at
+  `~/.config/herdr/auto-compact.log`); do not rely on it to save a pane you have
+  already filled.
+- **Apology loops.** Acknowledging a mistake once, in one line, is enough. Never
+  restate the rule you broke, never repeat the apology in the same turn, and
+  never re-explain the protocol to yourself. Correct the behaviour, name the next
+  step, move on.
+
+Blocking waits are refused by the runtime now (`role-guard.ts` blocks `hc wait`,
+`herdr-core wait`, `sleep`, `watch -n`, `while true`; the Claude runtime adds the
+same as deny rules). If a call comes back blocked, that is the system telling you
+the plan is wrong — assign, end the turn, and let the child push its result.
+Do not retry the wait in another form.
