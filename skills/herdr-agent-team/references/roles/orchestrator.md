@@ -183,6 +183,22 @@ compatibility path. Neither form authorizes closing unrelated workspaces.
    session, applies the Enter safeguard, and runs the runtime's stop command as its
    final command for the default session. Do not merely describe these actions.
 
+### Herdr app runtime (`hteam`)
+
+In the app runtime the shutdown path is `hteam-shutdown`, not
+`agent-team-shutdown` (that helper belongs to the TUI and talks to `herdr`,
+which cannot see app panes).
+
+1. Ask the Human once, in Thai, whether this Orchestrator pane should close as
+   well. One question, one answer; after a yes, do not ask again.
+2. Run `hteam-shutdown`, adding `--keep-orchestrator` if the Human wants the
+   pane to stay, and `--server-stop` only if the Human asked for a full stop.
+3. The helper closes every other live terminal, then this pane last, so the
+   report is delivered before the pane goes away. Do not close the panes
+   yourself first: an empty `hc ls` gives the helper nothing to confirm.
+4. Report that the session is closing *before* handing over. Never stop the
+   Herdr desktop app itself.
+
 Do not claim shutdown completed before the helper handoff and final server stop
 succeed. If any step fails, report `[STUCK]` to the Human with the actual error
 and remain available.
