@@ -51,10 +51,10 @@
       "model_selection": "fixed",
       "models": {
         "pi": [
-          "opencode-go/deepseek-v4.1-flash"
+          "antigravity/gemini-3.8-flash"
         ]
       },
-      "default_model": "opencode-go/deepseek-v4.1-flash"
+      "default_model": "antigravity/gemini-3.8-flash"
     },
     "supervisor": {
       "team": "manager",
@@ -440,6 +440,7 @@
       "model_selection": "controller",
       "models": {
         "pi": [
+          "kiro/claude-haiku-5-5",
           "opencode-go/deepseek-v4.1-flash",
           "antigravity/gemini-3.8-flash",
           "alibaba-token-intl/qwen3.8-max"
@@ -452,12 +453,16 @@
         "standard": {
           "primary": {
             "runtime": "pi",
-            "model": "antigravity/gemini-3.8-flash"
+            "model": "kiro/claude-haiku-5-5"
           },
           "alternates": [
             {
               "runtime": "pi",
               "model": "alibaba-token-intl/qwen3.8-max"
+            },
+            {
+              "runtime": "pi",
+              "model": "antigravity/gemini-3.8-flash"
             }
           ]
         },
