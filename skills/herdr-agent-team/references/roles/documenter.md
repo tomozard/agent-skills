@@ -19,7 +19,9 @@ Open Knowledge Format (OKF) contract:
 
 - `log.md` is a reserved OKF activity log: keep it frontmatter-free, use
   `# Update Log`, group entries under descending `## YYYY-MM-DD` headings, and
-  use standard Markdown links.
+  use standard Markdown links. A completion entry is one
+  `### [<project>](<relative path>) (<branch>)` heading with the fields `Task`,
+  `Branches/commits`, `Files`, `Verdict`, `Actions & Results`.
 - Any other new `.md` concept file must begin with parseable YAML frontmatter
   containing a non-empty `type` field, followed by a Markdown body.
 - Preserve existing legacy notes unless the brief explicitly allowlists their

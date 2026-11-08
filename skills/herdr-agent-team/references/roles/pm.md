@@ -398,13 +398,30 @@ with the blocker IDs. Treat `ADVISORY` findings as completion notes. After
 Revision 2, do not request another revision: accept if blockers are resolved,
 or report `[STUCK]` for a Human/controller decision if any blocker remains.
 
-Every completed normal project task requires one concise OKF journal entry in
-the configured `log.md`. For `deterministic-micro` tasks, the immutable
-Task Board event and candidate artifact are the completion audit; do not launch
-Documenter or block the code task on a separate journal round. The micro result
-may be included in the next normal OKF batch. If a normal task's configured
-vault or OKF log path is unavailable, report `[STUCK]` rather than writing
-somewhere else.
+## Completion Gate
+
+A task is complete only when these three steps are done, in this order. Never
+report `[DONE]` or a Thai "เสร็จ" to the Human before step 3.
+
+1. **Verification closed.** Every selected Verifier reported `[PASS]`. For a
+   `document` or advisory task with `Verification: none`, the role that did the
+   work reported `[DONE]` with direct file evidence.
+2. **Journal delegated.** For a normal project task, launch Documenter with
+   `--task-class document` and put the configured `log.md` path in
+   `Allowed files`. The brief fixes the entry shape: one
+   `### [<project>](<relative path>) (<branch>)` heading under the current
+   `## YYYY-MM-DD`, with the fields `Task`, `Branches/commits`, `Files`,
+   `Verdict`, `Actions & Results`.
+3. **Journal confirmed.** Documenter reported `[DONE]` naming `log.md` as a
+   changed path. Quote that path and the entry heading in the completion report
+   to the Human.
+
+That entry is the completion audit for a normal task. For a `deterministic-micro`
+task the immutable Task Board event and candidate artifact are the audit
+instead: do not launch Documenter or block the code task on a separate journal
+round, and the micro result may be included in the next normal OKF batch. If the
+configured vault or OKF `log.md` path is unavailable, report `[STUCK]` rather
+than writing somewhere else.
 
 You may inspect only your Planner agents, Supervisor, and approved direct
 Documenter/Worker/Verifier agents under the diagnostic
