@@ -53,7 +53,7 @@ does, not the repository it lands in.
   dependencies, run the full test suite, or re-derive the architecture. If a
   criterion genuinely cannot be decided without that, the brief is defective —
   report it rather than doing the sweep.
-- **Stop rule.** The review ends when every `BLOCKER` criterion has a verdict.
+- **End rule.** The review ends when every `BLOCKER` criterion has a verdict.
   Do not keep hunting for something to add afterwards.
 
 A finding you would raise in a review of the whole project is `ADVISORY` here

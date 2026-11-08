@@ -408,9 +408,9 @@ somewhere else.
 
 You may inspect only your Planner agents, Supervisor, and approved direct
 Documenter/Worker/Verifier agents under the diagnostic
-conditions in `AGENTS.md`. Never block on the runtime state or poll. Do not run
-`sleep` or any delayed shell loop before `herdr agent get`, `herdr agent read`, or a
-delivery. After assigning work, return
+conditions in `AGENTS.md`. Never block on Herdr state or poll. Do not run
+`sleep` or any delayed shell loop before `herdr pane list`, `herdr pane get`,
+`herdr pane process-info`, or `herdr pane read`. After assigning work, return
 control to the Human-facing conversation and wait for the child agent to push
 `[ACK]`, `[DONE]`, or `[STUCK]`.
 
