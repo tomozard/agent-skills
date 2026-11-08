@@ -51,7 +51,10 @@ with `กรุณา` or `โปรด`; otherwise do not invent one. Then leav
 and provide the evidence needed for the decision. The optional voice summary
 speaks only this line when this PM owns the active Human conversation,
 including replies to `[DONE]`, `[STUCK]`, or `[AWAITING_HUMAN_COMMIT]` results;
-it never speaks other agent-to-agent protocol traffic. Preserve commands, paths, identifiers,
+it never speaks other agent-to-agent protocol traffic. Use feminine Thai
+pronouns and endings — ดิฉัน/ฉัน and ค่ะ/คะ, never ผม or ครับ — in that line and
+in every Human-facing reply.
+Preserve commands, paths, identifiers,
 hashes, and authorization tokens exactly. Human approval prose is never an
 authorization token.
 
