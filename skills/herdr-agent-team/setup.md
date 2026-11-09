@@ -1,111 +1,264 @@
-# setup.md — install the Herdr agent-team harness
+# setup.md — install and configure the team (interactive)
 
-Read this only when `command -v hteam` prints nothing, or when the Human asks to
-install, repair or reinstall the team. Everything below is a command to run, not a
-description to summarise: run each step and report the output you actually got.
+Read this when `command -v hteam` prints nothing, or when the Human asks to
+install, configure or repair the team. This is a conversation: ask the questions
+in order, apply each answer with the command given, then move on. Do not batch the
+questions and do not invent answers — every value here is the Human's choice.
 
-This skill is self-contained. The launcher, the 12 role prompts, the guard
-binaries, the extensions and the voice scripts ship inside it under `harness/`,
-so `npx skills add` is the only download involved — there is no second repository
-to clone.
+The payload ships inside this skill under `harness/`; there is no second
+repository to clone.
 
 ## Hard rules
 
-- Never copy files into `~/bin`, `~/.agents/agents`, `~/.agents/extensions`,
-  `~/.claude/agents` or `~/.pi` by hand. Run the installer; a hand-copied file
-  differs from the installed one and every later verification lies about it.
-- Never edit anything under `~/.agents/skills/herdr-agent-team/`. `npx skills`
-  overwrites that directory on the next update; change the skill repository
-  instead.
-- Never run the uninstaller from inside a team role pane (`HERDR_AGENT_ROLE` is
-  set). It removes the binaries that pane is running from.
-- If a step fails, stop and report the exact stderr. The installer refuses for a
-  reason (missing prerequisite, missing skill scripts), and a second guess is how
-  an install half-lands.
+- Never copy files into `~/bin`, `~/.agents/*`, `~/.claude/agents` or `~/.pi` by
+  hand. Run the installer.
+- Never edit anything under `~/.agents/skills/herdr-agent-team/` — `npx skills`
+  overwrites it. Change the skill repository, or the config files named below.
+- Ask one phase at a time. If the Human declines a phase, record the default you
+  used and say so.
+- ClickUp **auto-intake is out of scope in this phase.** Do not write
+  `clickup-watch.yaml`, do not enable `--watch`, do not register ClickUp lists.
+  Record only which tracker the Human uses (phase 6).
 
-## 1. Prerequisites
+## Phase 1 — Herdr desktop app
 
 ```bash
-python3 --version                                  # 3.9+
-python3 -c 'import yaml; print(yaml.__version__)'  # PyYAML, pip --user is fine
-command -v herdr && herdr --version                # the Herdr CLI
-ls -l ~/.local/bin/herdr-app ~/.local/bin/herdr-core   # the Herdr desktop app
-command -v pi; command -v claude                   # at least one runtime
+command -v herdr && herdr --version
+ls -l ~/.local/bin/herdr-app ~/.local/bin/herdr-core
 ```
 
-If PyYAML is missing: `python3 -m pip install --user pyyaml`.
-If `herdr-app` or `herdr-core` is missing, the Herdr desktop app is not installed:
-say so and stop. Nothing in this skill can install the app.
+If any of the three is missing, stop and tell the Human: the team runs inside the
+Herdr desktop app and nothing in this skill installs it. Resume once the app is
+installed and `~/.local/bin/herdr-app` exists.
 
-## 2. Install the skill — this also delivers the harness payload
+## Phase 2 — which agent runtimes to use
 
 ```bash
-npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -a '*'
-npx skills add tomozard/agent-skills/skills/hteam -g -a '*'
+~/.agents/skills/herdr-agent-team/scripts/runtime-probe
 ```
 
-Expect two agent slots to fail with "does not support global skill installation"
-— that is not an error. Confirm the payload arrived:
+That table is the ground truth for this machine (`pi`, `claude`, `codex`,
+`opencode`, `kiro-cli`, `hermes`). **Ask:** which of the listed runtimes should the
+team use? At least one is required; two is the practical minimum because a writer
+and its verifier must not share a model.
+
+List the models for each runtime the Human picked:
 
 ```bash
-ls ~/.agents/skills/herdr-agent-team/harness/bin/agent-runtime
-ls ~/.agents/skills/herdr-agent-team/scripts/workflow-shape
+# pi — the models enabled in this Pi installation
+python3 -c 'import json,os;print("\n".join(json.load(open(os.path.expanduser("~/.pi/agent/settings.json")))["enabledModels"]))'
+
+# claude — aliases accepted by `claude --model`
+printf '%s\n' opus sonnet haiku
+
+# any other runtime: read its own help, then ask the Human to name the models
+codex --help; opencode --help; kiro-cli --help
 ```
 
-## 3. Install the runtime
+Record the ordered preference — it becomes `runtime_order`.
+
+## Phase 3 — model per tier
+
+Two tiers exist and the resolver picks one per task:
+
+| Tier | Used for | Expectation |
+|---|---|---|
+| `standard` | normal work | cheaper / faster model |
+| `critical` | high risk, or when a writer and its verifier would collide | strongest model |
+
+**Ask, per role group:** which `runtime/model` for `standard`, and which for
+`critical`?
+
+- writers: `coder`, `refactor`
+- verifiers: `reviewer`, `tester` — must resolve to a different model than the
+  writer that produced the diff, on both tiers
+- controllers: `orchestrator`, `pm` — `model_selection: fixed`, set `default_model`
+
+Apply the answers to the canonical config (a working clone if one exists, else the
+installed skill):
+
+```bash
+CFG=~/.agents/skills/herdr-agent-team/config/team.json
+[ -f ~/Workspaces/agent-skills/skills/herdr-agent-team/config/team.json ] && \
+  CFG=~/Workspaces/agent-skills/skills/herdr-agent-team/config/team.json
+python3 - "$CFG" <<'PY'
+import json, sys
+path = sys.argv[1]
+team = json.load(open(path))
+# Apply the Human's answers, then save. Shape per routed role:
+#   "models": {"pi": ["<model>", ...], "claude": ["<model>"]},
+#   "routing": {
+#     "standard": {"primary": {"runtime": "pi", "model": "<m>"}, "alternates": []},
+#     "critical": {"primary": {"runtime": "claude", "model": "<m>"}, "alternates": []}
+#   }
+# Fixed roles keep "model_selection": "fixed" and "default_model".
+json.dump(team, open(path, "w"), indent=2, ensure_ascii=False)
+open(path, "a").write("\n")
+PY
+```
+
+Verify before installing — this check matters more than the test suite:
+
+```bash
+S=~/.agents/skills/herdr-agent-team/scripts
+$S/roster coder    standard; $S/roster reviewer standard
+$S/roster coder    critical; $S/roster reviewer critical
+$S/workflow-shape --intake ~/.agents/skills/herdr-agent-team/examples/intake.json \
+  --team "$CFG" --format json \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["model_independence"])'
+```
+
+`model_independence.status` must be `ok`. If it reports a collision, change the
+verifier's model or raise the tier — never verify a writer with its own model.
+
+> `tests/validate.sh` asserts the **shipped** model tables (94 references), so a
+> customised routing fails it by design. Install with `--skip-validate` in phase 7
+> and rely on the roster and independence checks above.
+
+## Phase 4 — memory vault
+
+**Ask:** where should the team keep long-term notes and its activity journal?
+Suggest `~/Workspaces/vault`.
+
+```bash
+hteam-config set vault "<path>" activity_log "<path>/log.md"
+mkdir -p "<path>"                       # only with the Human's agreement
+[ -f "<path>/log.md" ] || printf '# Activity log\n' > "<path>/log.md"
+```
+
+The Documenter writes completion entries to `activity_log`. The Investigator reads
+only a scope named in the task — never the whole vault.
+
+## Phase 5 — projects folder and the registry
+
+**Ask:** which folder holds the projects the team may work on? Suggest
+`~/Workspaces`.
+
+```bash
+# candidate projects: git repositories at depth 1–2
+find "<folder>" -maxdepth 3 -name .git -type d -not -path '*/.git/*' \
+  | sed 's|/.git$||' | sort
+```
+
+Show that list, then **ask which ones to register**, with a one-line description
+each. Write them into the registry, merging — never overwriting:
+
+```bash
+REG="$(hteam-config show --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["registry"])')"
+mkdir -p "$(dirname "$REG")"
+[ -f "$REG" ] && cp "$REG" "$REG.bak-$(date +%Y%m%d-%H%M%S)"
+hteam-config set folder "<folder>" registry "$REG"
+# Append under `projects:` — one block per project:
+#   <slug>:
+#     name: <slug>
+#     path: <absolute path>
+#     description: <one line>
+#     status: active
+#     repos:
+#       <repo>:
+#         path: <absolute path>
+#         tech_stack: [<languages>]
+#         description: <one line>
+python3 -c 'import yaml,sys;d=yaml.safe_load(open(sys.argv[1]));print("projects:",len(d["projects"]))' "$REG"
+```
+
+The Orchestrator and PM resolve projects through this file; an unregistered project
+cannot be started.
+
+## Phase 6 — task status management
+
+**Ask:** is there an existing task-status tool the team should follow — ClickUp,
+Linear, Jira, Notion, or none?
+
+Record it; configure no integration in this phase:
+
+```bash
+mkdir -p ~/.config/herdr-team
+cat > ~/.config/herdr-team/task-status.md <<EOF
+tracker: <none|clickup|linear|jira|notion>
+workspace: <id or url, if any>
+auto_intake: deferred
+notes: <how the Human expects status to be reported>
+EOF
+```
+
+Work is dispatched by the Human in the PM pane; the team's own state lives on the
+task board and in the activity log. ClickUp auto-intake is a later phase and stays
+disabled (`hteam --watch off`).
+
+## Phase 7 — install
 
 ```bash
 cd ~/.agents/skills/herdr-agent-team/harness && ./setup_harness.sh
+# after custom routing in phase 3:
+cd ~/.agents/skills/herdr-agent-team/harness && ./setup_harness.sh --skip-validate
 ```
 
-The installer validates the payload first (`tests/validate.sh`, a few minutes),
-then installs 55 artifacts: 15 binaries in `~/bin` (including the `hteam`
-symlink), the role prompts in `~/.agents/agents`, `team.json` linked to the
-canonical config, the guard binaries, the extensions, the Claude agent
-definitions, `/hteam` for Pi, and the voice scripts.
+Point `repo` at the installed harness so the launcher does not need the old
+project-scaffold clone:
 
-## 4. Verify before telling the Human it worked
+```bash
+hteam-config set repo "$(cd ~/.agents/skills/herdr-agent-team/harness && pwd)"
+```
+
+The installer places 55 artifacts: 15 binaries in `~/bin` (including the `hteam`
+symlink), the role prompts in `~/.agents/agents`, `team.json` linked to the
+canonical config, the guard binaries, the extensions, the Claude agent definitions,
+`/hteam` for Pi, and the voice scripts.
+
+## Phase 8 — verify before reporting success
 
 ```bash
 cd ~/.agents/skills/herdr-agent-team/harness && ./uninstall.sh --check   # expect 55
-readlink ~/.agents/team.json                                  # expect the agent-skills config
-command -v hteam && hteam check                               # expect: check passed
+readlink ~/.agents/team.json
+hteam-config show                       # vault, folder, registry = the answers
+command -v hteam && hteam check
 ```
 
-`uninstall.sh --check` exits 1 while artifacts exist — that is the pass condition
-here. `hteam check` needs Herdr.app running; if it reports the app window is not
-reachable, open the app and re-run instead of reporting a broken install.
+`uninstall.sh --check` exits 1 while artifacts exist — that is the pass condition.
+Confirm `~/bin` is on `PATH` (`case ":$PATH:" in *":$HOME/bin:"*)`); add
+`export PATH="$HOME/bin:$PATH"` to `~/.zshrc` if not, then open a new shell.
 
-Also confirm `~/bin` is on `PATH` (`case ":$PATH:" in *":$HOME/bin:"*)`). The
-installer does not edit shell profiles; add `export PATH="$HOME/bin:$PATH"` to
-`~/.zshrc` if it is missing, then open a new shell.
-
-## 5. Failure modes
-
-| Symptom | Cause | Action |
-|---|---|---|
-| `the agent-skills tooling is missing` | step 2 skipped or half-installed | re-run the `npx skills add` command |
-| `PyYAML is missing` | pip dependency absent | `python3 -m pip install --user pyyaml` |
-| `clickup-watch tests failed` | PyYAML absent but the gate was bypassed | install PyYAML, re-run |
-| `missing role file` | step 3 not run, or run from the wrong directory | `cd ~/.agents/skills/herdr-agent-team/harness && ./setup_harness.sh` |
-| `coder cannot start on protected branch` | dispatch without `--work-branch` | pass the branch from the scope lock |
-| `unknown argument: --task-class` | `~/bin` holds older binaries | re-run step 3 |
-| `herdr app window is not reachable` | Herdr.app closed | open the app, re-run `hteam check` |
-
-## 6. Update or remove
+Write the decisions down so the next session does not re-ask:
 
 ```bash
-# update
+cat > ~/.config/herdr-team/setup-answers.md <<EOF
+# Team setup — $(date +%Y-%m-%d)
+runtimes: <chosen, in order>
+standard tier: <runtime/model per role group>
+critical tier: <runtime/model per role group>
+vault: <path>
+projects folder: <path>
+registry: <path> (<n> projects)
+tracker: <none|clickup|linear|jira|notion> (auto-intake deferred)
+EOF
+```
+
+## Phase 9 — update or remove
+
+```bash
+# update the payload, then reinstall
 npx skills update herdr-agent-team hteam -g -y
 cd ~/.agents/skills/herdr-agent-team/harness && ./setup_harness.sh
 
 # remove
-cd ~/.agents/skills/herdr-agent-team/harness && ./uninstall.sh   # 55 artifacts
+cd ~/.agents/skills/herdr-agent-team/harness && ./uninstall.sh
 npx skills remove herdr-agent-team hteam -g -y
-rm -f ~/.hermes/skills/{herdr-agent-team,hteam}                  # Hermes symlinks
+rm -f ~/.hermes/skills/{herdr-agent-team,hteam}
 ```
 
-`uninstall.sh` never deletes `{workspace}/.agents/task-board` (durable task
-state) or `~/.config/herdr-team/clickup-watch.yaml` (machine config). The ClickUp
-intake watcher also needs `workspace_id` set in that config; the shipped default
-is empty on purpose.
+`uninstall.sh` never deletes `{folder}/.agents/task-board`, the registry, the vault
+or `~/.config/herdr-team/setup-answers.md`.
+
+## Failure modes
+
+| Symptom | Cause | Action |
+|---|---|---|
+| `the agent-skills tooling is missing` | `npx skills add` not run | run the command it prints |
+| `PyYAML is missing` | pip dependency absent | `python3 -m pip install --user pyyaml` |
+| `clickup-watch tests failed` | PyYAML absent, gate bypassed | install PyYAML, re-run |
+| `validate: …` after phase 3 | suite asserts shipped model tables | use `--skip-validate`, keep the roster check |
+| `model_independence.status` not `ok` | writer and verifier share a model | change one model or the tier |
+| `missing role file` | phase 7 not run, or wrong directory | `cd …/harness && ./setup_harness.sh` |
+| `coder cannot start on protected branch` | dispatch without `--work-branch` | pass the branch from the scope lock |
+| `herdr app window is not reachable` | Herdr.app closed | open the app, re-run `hteam check` |

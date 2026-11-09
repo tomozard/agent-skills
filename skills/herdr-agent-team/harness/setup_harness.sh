@@ -7,16 +7,21 @@ SOURCE="$ROOT/.agents"
 
 usage() {
   cat <<'EOF'
-Usage: setup_harness.sh [--check]
+Usage: setup_harness.sh [--check|--skip-validate]
 
 Without arguments, validate and install the minimal Herdr agent-team runtime.
---check validates the repository without writing global runtime paths.
+--check          validates the payload without writing global runtime paths.
+--skip-validate  installs without running tests/validate.sh. Use it only after
+                 machine-local routing edits: the suite asserts the shipped
+                 model tables, so a customised team.json fails by design.
 EOF
 }
 
+SKIP_VALIDATE=0
 case "${1:-}" in
   "") ;;
   --check) exec "$ROOT/tests/validate.sh" ;;
+  --skip-validate) SKIP_VALIDATE=1 ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -80,7 +85,12 @@ run_validate() {
   return $rc
 }
 
-run_validate
+if [ "$SKIP_VALIDATE" = 1 ]; then
+  echo "setup_harness: validation skipped (--skip-validate)" >&2
+  echo "  verify routing with: scripts/roster <role> <tier> and scripts/workflow-shape --format json" >&2
+else
+  run_validate
+fi
 
 copy_file() {
   local source="$1" destination="$2"
