@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  echo "Usage: verify-pane-agent --pane ID --role ROLE --label LABEL"
+}
+
+PANE=""
+ROLE=""
+LABEL=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --pane) PANE="${2:-}"; shift 2 ;;
+    --role) ROLE="${2:-}"; shift 2 ;;
+    --label) LABEL="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "verify-pane-agent: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [ "${HERDR_ENV:-}" != "1" ]; then
+  echo "verify-pane-agent: HERDR_ENV=1 is required" >&2
+  exit 1
+fi
+
+if [ -z "$PANE" ] || [ -z "$ROLE" ] || [ -z "$LABEL" ]; then
+  usage >&2
+  exit 2
+fi
+
+PANE_JSON="$(herdr pane get "$PANE" 2>/dev/null || true)"
+PROCESS_JSON="$(herdr pane process-info --pane "$PANE" 2>/dev/null || true)"
+if [ -z "$PANE_JSON" ]; then
+  echo "verify-pane-agent: pane not found: $PANE" >&2
+  exit 1
+fi
+
+PANE_JSON="$PANE_JSON" PROCESS_JSON="$PROCESS_JSON" EXPECTED_PANE="$PANE" EXPECTED_ROLE="$ROLE" EXPECTED_LABEL="$LABEL" python3 - <<'PY'
+import json, os, re, sys
+
+def load(name):
+    try:
+        return json.loads(os.environ.get(name, "{}") or "{}")
+    except Exception:
+        return {}
+
+pane_data = load("PANE_JSON")
+process_data = load("PROCESS_JSON")
+role = os.environ["EXPECTED_ROLE"]
+label = os.environ["EXPECTED_LABEL"]
+
+pane = pane_data.get("result", {}).get("pane") or pane_data.get("result", {}) or pane_data
+labels = [str(pane.get(key, "")) for key in ("label", "name", "title")]
+label_ok = label in labels or any(label in value for value in labels)
+
+process_text = json.dumps(process_data)
+runtime_ok = bool(re.search(r'(^|[ /\"\\])(pi|claude)([ \"\\]|$)', process_text, re.I))
+role_ok = role in process_text or label_ok
+status = str(pane.get("agent_status") or pane.get("status") or "unknown")
+
+if label_ok and runtime_ok and role_ok:
+    print(json.dumps({"pane": os.environ["EXPECTED_PANE"], "label": label, "role": role, "status": status}))
+    raise SystemExit(0)
+
+print(f"verify-pane-agent: expected label={label} role={role}; label_ok={label_ok} runtime_ok={runtime_ok}", file=sys.stderr)
+raise SystemExit(1)
+PY

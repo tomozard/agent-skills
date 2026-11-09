@@ -1,0 +1,638 @@
+#!/usr/bin/env bash
+#
+# herdr-app-spawn-role — start one team role inside the Herdr desktop app
+# (herdr-app window + herdr-core `hc` terminals).
+#
+# Placement has two shapes:
+#
+#   child (default for every role below pm)  a child terminal of the controller
+#     that asked for it (`hc run --parent`), so the role is listed nested under
+#     that agent in the app sidebar and owns no tab. Children die with their
+#     parent; the controller closes them when the task ends.
+#   tab (orchestrator and pm, or --place tab)  grouped into
+#     manager-/planner-/worker-/verifier-{project} tabs, at most --max-panes
+#     panes left to right. The orchestrator holds the global space; pm is the
+#     tab the Human talks in.
+#
+# space = project, tab = group (tab mode), terminal = role.
+#
+# Usage:
+#   herdr-app-spawn-role <role> <brief-file> [options]
+#
+#   --project SLUG        project slug; also the space name (enables grouping)
+#   --workstream NAME     worker workstream suffix -> worker-{project}-{name}
+#   --space ID|NAME       space to use when no --project (default:
+#                         $HERDR_APP_SPACE, else "Herdr Team")
+#   --cwd DIR             working directory (default: the caller's cwd)
+#   --name LABEL          pane label (default: {role}-{project})
+#   --controller TID      terminal id of the assigning controller, used as the
+#                         hc parent and in the report line (default:
+#                         $HC_TERMINAL_ID)
+#   --place WHERE         child|tab|auto  (default: auto)
+#                         child: run as a child terminal of --controller, nested
+#                                under that agent in the app sidebar (no tab)
+#                         tab:   group into manager-/planner-/worker-/verifier-
+#                                {project} tabs, at most --max-panes per tab
+#                         auto:  tab for orchestrator and pm, child for every
+#                                other role
+#   --intake FILE         intake JSON for bin/workflow-shape. The resolver decides
+#                         staffing and tier, and this launcher refuses any role the
+#                         resolved shape does not include. PM bootstrap never uses it.
+#   --force               allow a second PM in a project that already has one
+#   --max-panes N         panes per tab before opening a new tab (default: 3)
+#   --model NAME          override the model (default: team.json tier primary)
+#   --runtime RUNTIME      pi|claude (default: the tier's routing primary, so a
+#                         critical tier launches claude/opus)
+#   --task-tier TIER      standard|critical (required for routed roles)
+#   --task-class CLASS    recorded task class (accepted for bin/hteam-dispatch
+#                         parity; the tier, not the class, decides routing)
+#   --work-branch NAME    create or check out NAME in --cwd before launching, so a
+#                         writer never starts on main/master/dev/uat/prod. Refuses
+#                         a dirty working tree; only the launcher bootstraps it.
+#   --routing-exception   permit an explicitly configured alternate for the tier
+#                         (bin/spawn-agent parity; agent-runtime refuses an
+#                         alternate without it)
+#   --commit-mode MODE    manual (default) or auto. auto needs AUTO_COMMIT in the
+#                         approved scope lock and lets the Worker commit as soon
+#                         as verification passes — one fewer controller round.
+#
+# Prints JSON: {"space","tab","terminal","mode","brief"}
+
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+APP="${HERDR_APP_BIN:-$(command -v herdr-app || echo "$HOME/.local/bin/herdr-app")}"
+HC="${HC_BIN:-$(command -v herdr-core || echo "$HOME/.local/bin/herdr-core")}"
+
+# Per-machine launcher config written by `/hteam setup`. Env vars and flags win:
+# hteam-config only exports keys that are not already set.
+CONFIG_BIN=""
+for cand in "$(command -v hteam-config 2>/dev/null || true)" \
+            "$HOME/bin/hteam-config" "$(dirname "$SELF")/hteam-config"; do
+  [ -n "$cand" ] && [ -x "$cand" ] && { CONFIG_BIN="$cand"; break; }
+done
+if [ -n "$CONFIG_BIN" ]; then
+  if ! CONFIG_ENV="$("$CONFIG_BIN" env 2>&1)"; then
+    echo "herdr-app-spawn-role: invalid launcher config: $CONFIG_ENV" >&2
+    exit 2
+  fi
+  eval "$CONFIG_ENV"
+fi
+
+ROLES="orchestrator pm supervisor sa investigator researcher designer coder refactor reviewer tester documenter"
+
+die() { echo "herdr-app-spawn-role: $*" >&2; exit 1; }
+usage() { awk 'NR>=3 && /^#/ { sub(/^# ?/, ""); print; next } NR>=3 { exit }' "$SELF"; }
+
+[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+ROLE="$1"; BRIEF_SRC="$2"; shift 2
+
+PROJECT=""
+WORKSTREAM=""
+SPACE="${HERDR_APP_SPACE:-${HERDR_TEAM_SPACE:-Herdr Team}}"
+CWD="$(pwd)"
+LABEL=""
+CONTROLLER="${HC_TERMINAL_ID:-}"
+MODEL=""
+RUNTIME=""
+TASK_TIER=""
+TASK_CLASS=""
+WORK_BRANCH=""
+ROUTING_EXCEPTION=""
+COMMIT_MODE="manual"
+MAX_PANES=3
+PLACE="auto"
+FORCE=0
+INTAKE=""
+if [ -z "${HERDR_TEAM_REPO:-}" ]; then
+  REPO=""
+  for cand in "$HOME/Workspaces/project-scaffold" "$HOME/project-scaffold" \
+              "$(cd "$(dirname "$SELF")/.." 2>/dev/null && pwd)"; do
+    [ -n "$cand" ] && [ -x "$cand/bin/agent-runtime" ] && { REPO="$cand"; break; }
+  done
+  REPO="${REPO:-$HOME/Workspaces/project-scaffold}"
+else
+  REPO="$HERDR_TEAM_REPO"
+fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --project) PROJECT="${2:-}"; shift 2 ;;
+    --workstream) WORKSTREAM="${2:-}"; shift 2 ;;
+    --space) SPACE="${2:-}"; SPACE_EXPLICIT=1; shift 2 ;;
+    --cwd) CWD="${2:-}"; shift 2 ;;
+    --name) LABEL="${2:-}"; shift 2 ;;
+    --controller) CONTROLLER="${2:-}"; shift 2 ;;
+    --model) MODEL="${2:-}"; shift 2 ;;
+    --runtime) RUNTIME="${2:-}"; shift 2 ;;
+    --task-tier) TASK_TIER="${2:-}"; shift 2 ;;
+    --task-class) TASK_CLASS="${2:-}"; shift 2 ;;
+    --work-branch) WORK_BRANCH="${2:-}"; shift 2 ;;
+    --routing-exception) ROUTING_EXCEPTION="true"; shift ;;
+    --commit-mode) COMMIT_MODE="${2:-}"; shift 2 ;;
+    --place) PLACE="${2:-}"; shift 2 ;;
+    --intake) INTAKE="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --max-panes) MAX_PANES="${2:-3}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+case " $ROLES " in *" $ROLE "*) ;; *) die "unknown role: $ROLE (one of: $ROLES)" ;; esac
+
+# One space per project. A project role launched without --project used to fall
+# back to the control space, which is how a pm-{project} tab ended up mixed into
+# the Orchestrator's space: refuse that instead of guessing.
+if [ "$ROLE" != "orchestrator" ]; then
+  [ -n "$PROJECT" ] || die "role $ROLE belongs to a project team: pass --project <slug> (each project gets its own app space)"
+  if [ "${SPACE_EXPLICIT:-0}" = "1" ]; then
+    die "--space and --project are exclusive for project roles: --project selects the project space"
+  fi
+fi
+case "$PLACE" in
+  auto)
+    case "$ROLE" in
+      orchestrator|pm) PLACE="tab" ;;
+      *) PLACE="child" ;;
+    esac
+    ;;
+  child|tab) ;;
+  *) die "unknown --place: $PLACE (child|tab|auto)" ;;
+esac
+[ -r "$BRIEF_SRC" ] || die "brief not readable: $BRIEF_SRC"
+[ -x "$REPO/bin/agent-runtime" ] || die "missing $REPO/bin/agent-runtime (set HERDR_TEAM_REPO)"
+[ -r "$REPO/.agents/agents/$ROLE.md" ] || die "missing role file: $REPO/.agents/agents/$ROLE.md"
+[ -x "$APP" ] || die "herdr-app not found"
+[ -d "$CWD" ] || die "cwd not found: $CWD"
+
+# --- staffing enforcement -----------------------------------------------
+# With --intake the resolver decides who may work on this task: the same intake
+# that PM used to pick the shape is replayed here, and a role outside that shape
+# is refused. PM cannot quietly over-staff, because the decision is made by code.
+# Staffing comes from the resolver, so an executing role always needs the intake.
+# Controllers (orchestrator, PM, supervisor) are not shape members: they are the
+# layer that staffs, and their workers still hit this gate.
+if [ -z "$INTAKE" ]; then
+  case "$ROLE" in
+    orchestrator|pm|supervisor) ;;
+    *) die "role '$ROLE' needs --intake <task.json>: staffing comes from the resolver.
+      Write the intake this task was staffed from, then pass the same file to every
+      spawn (see bin/workflow-shape --intake)." ;;
+  esac
+fi
+
+SHAPE_NAME=""
+if [ -n "$INTAKE" ]; then
+  [ "$ROLE" != "pm" ] || die "PM is bootstrap, not a shape member: drop --intake (or use hteam)"
+  [ -r "$INTAKE" ] || die "intake file not readable: $INTAKE"
+  SHAPE_BIN="$REPO/bin/workflow-shape"
+  [ -x "$SHAPE_BIN" ] || die "missing $SHAPE_BIN (the staffing resolver)"
+  if ! RESOLVED_JSON="$("$SHAPE_BIN" --intake "$INTAKE" 2>&1)"; then
+    die "the intake was rejected: $RESOLVED_JSON"
+  fi
+  read -r SHAPE_NAME SHAPE_TIER ALLOWED_ROLES <<<"$(printf '%s' "$RESOLVED_JSON" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+roles = [item.get("role") for item in data.get("staff") or []]
+roles += list(data.get("verifiers") or [])
+print(data.get("shape", ""), data.get("tier", ""), ",".join(sorted({r for r in roles if r})))
+')"
+  case ",$ALLOWED_ROLES," in
+    *",$ROLE,"*) ;;
+    *) die "role '$ROLE' is not part of shape $SHAPE_NAME (allowed: ${ALLOWED_ROLES//,/ | }).
+      Staffing comes from the intake; raise the shape with a written reason or ask the Human." ;;
+  esac
+  if [ -n "$TASK_TIER" ] && [ "$TASK_TIER" != "$SHAPE_TIER" ]; then
+    die "--task-tier $TASK_TIER disagrees with the intake, which resolves to $SHAPE_TIER
+      Fix the intake or drop --task-tier so the resolver decides."
+  fi
+  TASK_TIER="$SHAPE_TIER"
+fi
+
+# --- topology: space, tab, label -------------------------------------------
+case "$ROLE" in
+  orchestrator) GROUP="" ;;
+  pm|supervisor) GROUP="manager" ;;
+  sa|investigator|researcher|designer) GROUP="planner" ;;
+  coder|refactor) GROUP="worker" ;;
+  reviewer|tester) GROUP="verifier" ;;
+  documenter) GROUP="doc" ;;
+  *) GROUP="$ROLE" ;;
+esac
+
+if [ "$ROLE" = "orchestrator" ]; then
+  SPACE_NAME="$SPACE"
+  TAB_NAME="orchestrator"
+elif [ -n "$PROJECT" ]; then
+  # space = project: a project never shares the Orchestrator's control space.
+  SPACE_NAME="$PROJECT"
+  if [ -n "$GROUP" ]; then
+    TAB_NAME="$GROUP-$PROJECT"
+  else
+    TAB_NAME="$PROJECT"
+  fi
+  if [ "$GROUP" = "worker" ] && [ -n "$WORKSTREAM" ]; then
+    TAB_NAME="$TAB_NAME-$WORKSTREAM"
+  fi
+else
+  SPACE_NAME="$SPACE"
+  TAB_NAME="$ROLE"
+fi
+
+# One PM per project: the PM is the project's chief of staff, so a second one
+# would split the Human conversation and fight over the same work.
+#
+# The app assigns its `where` label a moment after a terminal appears, so a guard
+# that only reads `hc ls` misses a PM spawned seconds earlier. A PM registry file
+# written at spawn time closes that race; the scan stays as a fallback for panes
+# started outside this launcher. --force is the explicit Human override.
+PM_REGISTRY="${HERDR_TEAM_PM_REGISTRY:-${HERDR_TEAM_STATE_DIR:-$HOME/.local/state/herdr-app-team}/pm}"
+
+pm_registry_file() {
+  printf '%s/%s.terminal' "$PM_REGISTRY" \
+    "$(printf '%s' "$PROJECT" | tr -c 'a-zA-Z0-9._-' '_')"
+}
+
+pm_registered_terminal() {
+  local file term
+  file="$(pm_registry_file)"
+  [ -r "$file" ] || return 1
+  term="$(tr -d '[:space:]' < "$file")"
+  [ -n "$term" ] || return 1
+  "$HC" get "$term" --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+if data.get("state") != "live":
+    raise SystemExit(1)
+print(data.get("address", ""))
+' 2>/dev/null || return 1
+}
+
+pm_scan_existing() {
+  "$HC" ls 2>/dev/null | python3 -c '
+import json, sys
+space, tab = sys.argv[1], sys.argv[2]
+out = []
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for term in data.get("terminals") or []:
+    labels = term.get("labels") or {}
+    where = labels.get("where") or term.get("where") or ""
+    if where.startswith(space + " /") and (labels.get("role") == "pm" or where.endswith("/ " + tab)):
+        out.append("%s (%s)" % (term.get("address"), where))
+print("\n".join(out))
+' "$SPACE_NAME" "$TAB_NAME"
+}
+
+if [ "$ROLE" = "pm" ] && [ "${FORCE:-0}" != "1" ]; then
+  if registered="$(pm_registered_terminal)"; then
+    die "project '$PROJECT' already has a PM: $registered ($(pm_registry_file))
+      Talk to that PM, or close it first. Re-spawning it needs --force."
+  fi
+  scanned="$(pm_scan_existing)"
+  if [ -n "$scanned" ]; then
+    die "project '$PROJECT' already has a live PM: $scanned
+      Talk to that PM, or close it first. Re-spawning it needs --force."
+  fi
+fi
+
+if [ -z "$LABEL" ]; then
+  if [ -n "$PROJECT" ] && [ "$ROLE" != "orchestrator" ]; then
+    LABEL="$ROLE-$PROJECT"
+    [ -n "$WORKSTREAM" ] && LABEL="$LABEL-$WORKSTREAM"
+  else
+    LABEL="$ROLE"
+  fi
+fi
+
+# --- compose the seeded brief ----------------------------------------------
+STATE_DIR="$(dirname "$BRIEF_SRC")"
+OUT_BRIEF="$STATE_DIR/${ROLE}-startup.md"
+REPORT_TARGET="${CONTROLLER:-none}"
+if [ "$PLACE" = "child" ] && [ -z "$CONTROLLER" ]; then
+  die "child placement needs a controller terminal: pass --controller <t> or run inside one"
+fi
+{
+  cat "$BRIEF_SRC"
+  if [ "$PLACE" = "child" ]; then
+    cat <<EOF
+
+---
+Runtime (Herdr desktop app: herdr-core child terminal)
+- You are role \`${ROLE}\`, started as a CHILD terminal of your controller
+  \`${REPORT_TARGET}\`; your own id is \$HC_TERMINAL_ID. You own no tab: the app
+  lists you nested under your controller's agent row in space \`${SPACE_NAME}\`.
+- Report, ask, and hand off with:   $HC send ${REPORT_TARGET} "<short message>"
+  One message per report. Never report only to yourself.
+- Spawn a sub-role:                 $SELF <role> <brief-file> --project ${PROJECT:-<project-slug>} --controller "\$HC_TERMINAL_ID" --intake <task.json>
+  It opens as your own child terminal, nested under you in the sidebar, in this
+  project's own space. --project is mandatory: it is what keeps this project out
+  of the Orchestrator's control space. --intake is the staffing gate: pass the
+  same intake you staffed the task from, and the launcher refuses any role that
+  shape does not include (it also takes the task tier from it).
+- Cleanup is yours (mandatory): when your assignment is complete and your final
+  report is sent, close every child you opened with \`$HC kill <terminal>\`.
+  A child also dies with its parent, so leaving them is an orphan leak: close
+  them explicitly. Never kill your controller or a peer.
+- Read only agents you assigned:    $HC read <terminal-id> --lines 200
+- List terminals:                   $HC ls
+- The \`herdr\` binary belongs to a different runtime: never call it.
+- No blocking waits: coordination is push-based. Send assignments longer than
+  ten lines as a file path instead of pasting them.
+- Follow the minimal-change and scope-lock policy in your role text. Do not
+  commit, push, or open a PR without the exact Human authorization relayed by
+  your controller.
+EOF
+  else
+    cat <<EOF
+
+---
+Runtime (Herdr desktop app: herdr-core terminals + herdr-app window)
+- You are role \`${ROLE}\` in Herdr space \`${SPACE_NAME}\`, tab \`${TAB_NAME}\`.
+  Your terminal id is in \$HC_TERMINAL_ID and your controller's terminal id is
+  \`${REPORT_TARGET}\`.
+- Report, ask, and hand off with:   $HC send ${REPORT_TARGET} "<short message>"
+  One message per report. Never report only to yourself.
+- Spawn a sub-role:                 $SELF <role> <brief-file> --project ${PROJECT:-<project-slug>} --controller "\$HC_TERMINAL_ID" --intake <task.json>
+  Every role below PM starts as a child terminal of the controller that asked
+  for it, so it appears nested under that agent in the sidebar and owns no tab.
+  --intake is the staffing gate: write the intake once per task, pass the same
+  file to every spawn, and the launcher refuses roles outside the resolved shape
+  (it also takes the task tier from it).
+EOF
+    if [ "$ROLE" = "pm" ]; then
+      cat <<EOF
+- You own the lifetime of your children: when the task is complete (reports
+  collected, verification and commit gate reached, or [STUCK] raised) close
+  every child terminal you opened with \`$HC kill <terminal>\` and leave none
+  running. Closing a worker also ends the children it opened.
+EOF
+    fi
+    cat <<EOF
+- List terminals:                   $HC ls
+- The \`herdr\` binary belongs to a different runtime: never call it.
+- No blocking waits: coordination is push-based. Send assignments longer than
+  ten lines as a file path instead of pasting them.
+- Follow the minimal-change and scope-lock policy in your role text. Do not
+  commit, push, or open a PR without the exact Human authorization relayed by
+  your controller.
+EOF
+  fi
+} > "$OUT_BRIEF"
+
+# --- resolve runtime + model from team.json --------------------------------
+# The tier's routing primary decides BOTH: critical tiers route to claude/opus
+# for coder and reviewer, standard tiers to a pi model. Hardcoding `pi` here is
+# what made every critical role fail agent-runtime's policy check. --runtime and
+# --model still override, and a fixed role (no tier) keeps its first pi model.
+if [ -z "$RUNTIME" ] || [ -z "$MODEL" ]; then
+  RESOLVED="$(python3 - "$REPO/.agents/team.json" "$ROLE" "${TASK_TIER:-}" "$RUNTIME" "$MODEL" <<'PY'
+import json, sys
+path, role, tier, want_runtime, want_model = sys.argv[1:6]
+try:
+    team = json.load(open(path))
+    entry = team["roles"][role]
+except Exception:
+    team, entry = {}, {}
+models = entry.get("models") or {}
+order = team.get("runtime_order") or ["pi", "claude"]
+pair = ((entry.get("routing") or {}).get(tier) or {}).get("primary") or {} if tier else {}
+runtime = want_runtime or pair.get("runtime") or ""
+model = want_model or pair.get("model") or ""
+if not runtime:
+    runtime = next((r for r in order if models.get(r)), "")
+if not model:
+    model = (models.get(runtime) or [""])[0]
+print("%s\t%s" % (runtime, model))
+PY
+)"
+  IFS=$'\t' read -r RESOLVED_RUNTIME RESOLVED_MODEL <<< "$RESOLVED"
+  [ -n "$RUNTIME" ] || RUNTIME="$RESOLVED_RUNTIME"
+  [ -n "$MODEL" ] || MODEL="$RESOLVED_MODEL"
+fi
+[ -n "$RUNTIME" ] || die "role $ROLE: cannot resolve a runtime; pass --runtime pi|claude"
+[ -n "$MODEL" ] || die "role $ROLE has no $RUNTIME model in .agents/team.json: pass --model"
+case "$RUNTIME" in
+  pi|claude) ;;
+  *) die "--runtime must be pi or claude, got '$RUNTIME'" ;;
+esac
+
+case "$COMMIT_MODE" in
+  manual) ;;
+  auto)
+    # bin/spawn-agent parity: auto commit exists so the Human can pre-authorize
+    # the commit in the scope lock (AUTO_COMMIT) and the Worker commits as soon
+    # as verification passes, without another controller round trip.
+    case "$ROLE" in
+      coder|refactor|supervisor) ;;
+      *) die "--commit-mode auto is valid only for coder, refactor or supervisor, not $ROLE" ;;
+    esac
+    ;;
+  *) die "--commit-mode must be manual or auto, got '$COMMIT_MODE'" ;;
+esac
+
+if [ -z "$TASK_TIER" ]; then
+  sel="$(python3 - "$REPO/.agents/team.json" "$ROLE" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1]))["roles"][sys.argv[2]].get("model_selection", ""))
+except Exception:
+    print("")
+PY
+)"
+  [ "$sel" = "fixed" ] || die "role $ROLE is controller-selected: pass --task-tier standard|critical"
+fi
+
+# --- work branch bootstrap ------------------------------------------------
+# agent-runtime refuses a writer on main/master/dev/uat/prod, and the app runtime
+# has nowhere else to create the work branch, so the launcher creates or switches
+# it here. Only an explicit --work-branch does this: nothing is guessed.
+if [ -n "$WORK_BRANCH" ]; then
+  case "$WORK_BRANCH" in
+    *[!A-Za-z0-9._/-]*|"") die "invalid --work-branch: $WORK_BRANCH" ;;
+  esac
+  # The launcher runs inside the controller's shell, where ~/.agents/guard-bin/git
+  # polices role agents (it refuses `checkout` for role=pm). Bootstrapping the work
+  # branch is the launcher's job, sanctioned by the approved scope lock, so call the
+  # real binary the guard itself uses instead of the wrapper.
+  GIT_BIN="${HERDR_REAL_GIT:-/usr/bin/git}"
+  [ -x "$GIT_BIN" ] || GIT_BIN="/opt/homebrew/bin/git"
+  [ -x "$GIT_BIN" ] || die "git not found for --work-branch"
+  "$GIT_BIN" -C "$CWD" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "--work-branch needs a git repository at $CWD"
+  current="$("$GIT_BIN" -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
+  if [ "$current" != "$WORK_BRANCH" ]; then
+    if [ -n "$("$GIT_BIN" -C "$CWD" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+      die "working tree is dirty in $CWD; commit or stash before switching to $WORK_BRANCH"
+    fi
+    if "$GIT_BIN" -C "$CWD" show-ref --verify --quiet "refs/heads/$WORK_BRANCH"; then
+      "$GIT_BIN" -C "$CWD" checkout -q "$WORK_BRANCH" || die "cannot check out $WORK_BRANCH"
+    else
+      "$GIT_BIN" -C "$CWD" checkout -q -b "$WORK_BRANCH" || die "cannot create $WORK_BRANCH"
+    fi
+    echo "herdr-app-spawn-role: work branch $WORK_BRANCH (was $current)"
+  fi
+fi
+
+ARGV=(env HERDR_ENV=1 "HERDR_VOICE_MODE=${HERDR_VOICE_MODE:-off}" \
+      "$REPO/bin/agent-runtime" \
+      --role "$ROLE" --runtime "$RUNTIME" --label "$LABEL" --model "$MODEL" --cwd "$CWD")
+[ -n "$TASK_TIER" ] && ARGV+=(--task-tier "$TASK_TIER")
+[ "$ROUTING_EXCEPTION" = "true" ] && ARGV+=(--routing-exception)
+ARGV+=(--commit-mode "$COMMIT_MODE")
+if [ -n "${HERDR_AGENT_ROLE:-}" ]; then ARGV+=(--controller-role "$HERDR_AGENT_ROLE"); fi
+ARGV+=(--initial-prompt "$(cat "$OUT_BRIEF")")
+
+ARGV_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${ARGV[@]}")"
+
+if [ "$PLACE" = "child" ]; then
+  # --- place it as a child terminal of the requesting controller ------------
+  CHILD_NAME="$(python3 - "$ROLE" "${PROJECT:-}" "${WORKSTREAM:-}" "$HC" <<'PY'
+import json, re, subprocess, sys
+
+role, project, workstream, hc = sys.argv[1:5]
+base = "-".join(p for p in (role, project, workstream) if p).lower()
+base = re.sub(r"[^a-z0-9_-]+", "-", base).strip("-_") or "role"
+base = (base[:32].strip("-_")) or "role"
+
+# hc terminal names must be unique among live terminals (tab placement had no
+# such rule), so a second reviewer of the same project gets a numeric suffix.
+live = set()
+try:
+    out = subprocess.run([hc, "ls", "--json"], capture_output=True, text=True).stdout
+    for term in json.loads(out or "{}").get("terminals") or []:
+        if term.get("name"):
+            live.add(term["name"])
+except Exception:
+    pass
+name, n = base, 2
+while name in live:
+    suffix = "-%d" % n
+    name = (base[: 32 - len(suffix)].strip("-_") or "role") + suffix
+    n += 1
+print(name)
+PY
+)"
+  RESULT="$("$HC" run --bg --name "$CHILD_NAME" --cwd "$CWD" --parent "$CONTROLLER" \
+    --label "role=$ROLE" --label "project=${PROJECT:--}" --label "controller=$CONTROLLER" \
+    -- "${ARGV[@]}" 2>&1)" \
+    || { echo "$RESULT" >&2; die "could not start $ROLE as a child of $CONTROLLER"; }
+  MODE_OUT="child"
+  TERMINAL="$(printf '%s' "$RESULT" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+print(d.get("address") or "")
+')"
+  [ -n "$TERMINAL" ] || { echo "$RESULT" >&2; die "no terminal address in the runtime reply"; }
+else
+  # --- place it: split into the group tab, or open that tab ----------------
+  PLACEMENT="$(APP="$APP" SPACE="$SPACE_NAME" TAB="$TAB_NAME" MAX="$MAX_PANES" python3 - <<'PY'
+import json, os, subprocess
+out = subprocess.run([os.environ["APP"], "ls"], capture_output=True, text=True)
+try:
+    data = json.loads(out.stdout or "{}")
+except Exception:
+    data = {}
+space = None
+for s in data.get("spaces") or []:
+    if (s.get("name") or "") == os.environ["SPACE"] or s.get("id") == os.environ["SPACE"]:
+        space = s
+        break
+if space is None:
+    print("newspace")
+    raise SystemExit
+for t in space.get("tabs") or []:
+    if (t.get("name") or "") == os.environ["TAB"]:
+        terms = t.get("terminals") or []
+        if terms and len(terms) < int(os.environ["MAX"]):
+            print("split " + terms[-1]["pane"])
+        else:
+            print("newtab")
+        raise SystemExit
+print("newtab")
+PY
+)"
+
+MODE_OUT="$(printf '%s' "$PLACEMENT" | awk '{print $1}')"
+PANE_OUT="$(printf '%s' "$PLACEMENT" | awk '{print $2}')"
+
+space_id() {
+  APP="$APP" SPACE="$SPACE_NAME" python3 -c '
+import json, os, subprocess
+out = subprocess.run([os.environ["APP"], "ls"], capture_output=True, text=True)
+try:
+    data = json.loads(out.stdout or "{}")
+except Exception:
+    data = {}
+for s in data.get("spaces") or []:
+    if (s.get("name") or "") == os.environ["SPACE"] or s.get("id") == os.environ["SPACE"]:
+        print(s["id"]); break
+'
+}
+
+case "$MODE_OUT" in
+  split)
+    RESULT="$("$APP" do pane.split --direction right --pane "$PANE_OUT" --argv "$ARGV_JSON" 2>&1)" \
+      || { echo "$RESULT" >&2; die "the app refused to split pane $PANE_OUT"; }
+    ;;
+  newtab)
+    SPACE_ID="$(space_id)"
+    [ -n "$SPACE_ID" ] || die "no Herdr app space named '$SPACE_NAME'"
+    RESULT="$("$APP" do tab.new --space "$SPACE_ID" --name "$TAB_NAME" --folder "$CWD" --argv "$ARGV_JSON" 2>&1)" \
+      || { echo "$RESULT" >&2; die "the app refused to open tab '$TAB_NAME'"; }
+    ;;
+  newspace)
+    RESULT="$("$APP" do space.new --name "$SPACE_NAME" --folder "$CWD" --tab "$TAB_NAME" --argv "$ARGV_JSON" 2>&1)" \
+      || { echo "$RESULT" >&2; die "the app refused to open space '$SPACE_NAME'"; }
+    MODE_OUT="tab"
+    ;;
+  *)
+    die "unexpected placement result: $PLACEMENT"
+    ;;
+esac
+
+TERMINAL="$(printf '%s' "$RESULT" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+print(d.get("terminal") or "")
+')"
+  [ -n "$TERMINAL" ] || { echo "$RESULT" >&2; die "no terminal id in the app's reply"; }
+fi
+
+# Identify the terminal for `hc ls` / debugging (the app sets space/tab labels).
+"$HC" label "$TERMINAL" "role=$ROLE" "project=${PROJECT:--}" "shape=${SHAPE_NAME:-}" >/dev/null 2>&1 || true
+
+# Remember the project's chief of staff so a duplicate spawn is refused.
+if [ "$ROLE" = "pm" ]; then
+  mkdir -p "$PM_REGISTRY"
+  printf '%s\n' "$TERMINAL" > "$(pm_registry_file)"
+fi
+
+# Waiting is where a controller burns its context: sleep + read loops cost a
+# turn each and produce nothing. Say the one cheap call out loud at dispatch.
+cat >&2 <<HINT
+herdr-app-spawn-role: $ROLE is running as $TERMINAL.
+  wait for it:   $HC wait --children any     (one call; returns on its next report or a message to you)
+  or stop now:   end your turn — its message wakes you
+  never:         sleep or $HC read $TERMINAL to check progress (inspect only when
+                 the Human asks, or one check after a report is overdue)
+HINT
+
+python3 - "$SPACE_NAME" "$TAB_NAME" "$TERMINAL" "$MODE_OUT" "$OUT_BRIEF" "${CONTROLLER:-}" <<'PY'
+import json, sys
+tab = "" if sys.argv[4] == "child" else sys.argv[2]
+print(json.dumps({
+    "space": sys.argv[1], "tab": tab, "terminal": sys.argv[3],
+    "mode": sys.argv[4], "brief": sys.argv[5],
+    "parent": sys.argv[6] if sys.argv[4] == "child" else "",
+}))
+PY
+exit 0

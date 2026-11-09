@@ -1,0 +1,832 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: agent-runtime --role ROLE --cwd PATH [options]
+
+Options:
+  --runtime auto|pi|claude   Fixed roles may use auto; routed roles require pi or claude
+  --label LABEL             Session display label (default: ROLE)
+  --model MODEL             Allowlisted override for fixed roles; required selection for routed roles
+  --operation MODE          implementation (default) or protected-sync
+  --commit-mode MODE        manual (default) or auto; auto must be scope-approved
+  --sync-branch NAME        Protected branch for protected-sync
+  --controller-role ROLE    Role that assigned this child
+  --staffing MODE           minimal, focused, or full
+  --task-class CLASS        Task class; document enables scoped document-writing mode
+  --verification-profile PROFILE  independent (default) or deterministic-micro
+  --knowledge-source SOURCE repository (default) or vault
+  --vault-read-scope PATH   Approved file or directory below the configured vault root
+  --task-tier TIER          Required routed-role tier: standard or critical
+  --routing-exception       Permit an explicitly configured alternate for the tier
+  --initial-prompt TEXT     Optional first interactive user message
+  -h, --help                Show this help
+EOF
+}
+
+ROLE=""
+CWD=""
+RUNTIME="auto"
+LABEL=""
+MODEL=""
+INITIAL_PROMPT=""
+OPERATION="implementation"
+COMMIT_MODE="manual"
+SYNC_BRANCH=""
+CONTROLLER_ROLE=""
+STAFFING="focused"
+TASK_CLASS="general"
+VERIFICATION_PROFILE="independent"
+KNOWLEDGE_SOURCE="repository"
+VAULT_READ_SCOPE=""
+TASK_TIER=""
+ROUTING_EXCEPTION="false"
+VAULT_PATH="${HERDR_TEAM_VAULT_PATH:-}"
+ACTIVITY_LOG="${HERDR_TEAM_ACTIVITY_LOG:-}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --role) ROLE="${2:-}"; shift 2 ;;
+    --cwd) CWD="${2:-}"; shift 2 ;;
+    --runtime) RUNTIME="${2:-}"; shift 2 ;;
+    --label) LABEL="${2:-}"; shift 2 ;;
+    --model) MODEL="${2:-}"; shift 2 ;;
+    --initial-prompt) INITIAL_PROMPT="${2:-}"; shift 2 ;;
+    --operation) OPERATION="${2:-}"; shift 2 ;;
+    --commit-mode) COMMIT_MODE="${2:-}"; shift 2 ;;
+    --sync-branch) SYNC_BRANCH="${2:-}"; shift 2 ;;
+    --controller-role) CONTROLLER_ROLE="${2:-}"; shift 2 ;;
+    --staffing) STAFFING="${2:-}"; shift 2 ;;
+    --task-class) TASK_CLASS="${2:-}"; shift 2 ;;
+    --verification-profile) VERIFICATION_PROFILE="${2:-}"; shift 2 ;;
+    --knowledge-source) KNOWLEDGE_SOURCE="${2:-}"; shift 2 ;;
+    --vault-read-scope) VAULT_READ_SCOPE="${2:-}"; shift 2 ;;
+    --task-tier) TASK_TIER="${2:-}"; shift 2 ;;
+    --routing-exception) ROUTING_EXCEPTION="true"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "agent-runtime: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ "${HERDR_ENV:-}" != "1" ]; then
+  echo "agent-runtime: HERDR_ENV=1 is required" >&2
+  exit 1
+fi
+
+if [ -z "$ROLE" ] || [ -z "$CWD" ]; then
+  usage >&2
+  exit 2
+fi
+
+case "$RUNTIME" in
+  auto|pi|claude) ;;
+  *) echo "agent-runtime: runtime must be auto, pi, or claude" >&2; exit 2 ;;
+esac
+
+case "$STAFFING" in
+  minimal|focused|full) ;;
+  *) echo "agent-runtime: staffing must be minimal, focused, or full" >&2; exit 2 ;;
+esac
+
+case "$TASK_CLASS" in
+  general|advisory|document|operational|delivery|investigation|bug-fix|feature|refactor) ;;
+  *) echo "agent-runtime: unsupported task class: $TASK_CLASS" >&2; exit 2 ;;
+esac
+
+case "$VERIFICATION_PROFILE" in
+  independent|deterministic-micro) ;;
+  *) echo "agent-runtime: unsupported verification profile: $VERIFICATION_PROFILE" >&2; exit 2 ;;
+esac
+
+case "$KNOWLEDGE_SOURCE" in
+  repository|vault) ;;
+  *) echo "agent-runtime: knowledge source must be repository or vault" >&2; exit 2 ;;
+esac
+
+case "$TASK_TIER" in
+  ""|standard|critical) ;;
+  *) echo "agent-runtime: task tier must be standard or critical" >&2; exit 2 ;;
+esac
+
+case "$OPERATION" in
+  implementation)
+    if [ -n "$SYNC_BRANCH" ]; then
+      echo "agent-runtime: --sync-branch is valid only for protected-sync" >&2
+      exit 2
+    fi
+    ;;
+  protected-sync)
+    case "$ROLE" in
+      coder|refactor) ;;
+      *) echo "agent-runtime: protected-sync is valid only for coder or refactor" >&2; exit 2 ;;
+    esac
+    if [ -z "$SYNC_BRANCH" ]; then
+      echo "agent-runtime: --sync-branch is required for protected-sync" >&2
+      exit 2
+    fi
+    case "$SYNC_BRANCH" in
+      main|master|dev|uat|prod) ;;
+      *) echo "agent-runtime: protected-sync requires a protected branch" >&2; exit 2 ;;
+    esac
+    if [ "${CONTROLLER_ROLE:-${HERDR_AGENT_ROLE:-}}" != "supervisor" ]; then
+      echo "agent-runtime: protected-sync must be launched by Supervisor" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "agent-runtime: unsupported operation: $OPERATION" >&2; exit 2 ;;
+esac
+
+case "$COMMIT_MODE" in
+  manual|auto) ;;
+  *) echo "agent-runtime: commit mode must be manual or auto" >&2; exit 2 ;;
+esac
+if [ "$COMMIT_MODE" = "auto" ] && { [ "$OPERATION" != "implementation" ] || { [ "$ROLE" != "supervisor" ] && [ "$ROLE" != "coder" ] && [ "$ROLE" != "refactor" ]; }; }; then
+  echo "agent-runtime: auto commit is valid only for an implementation Supervisor, Coder, or Refactor" >&2
+  exit 2
+fi
+
+CWD="$(python3 -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$CWD")"
+if [ ! -d "$CWD" ]; then
+  echo "agent-runtime: cwd does not exist: $CWD" >&2
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ -f "${AGENTS_HOME:-$HOME/.agents}/team.json" ]; then
+  AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
+elif [ -f "$REPO_ROOT/.agents/team.json" ]; then
+  AGENTS_HOME="$REPO_ROOT/.agents"
+else
+  echo "agent-runtime: team.json not found; run setup_harness.sh" >&2
+  exit 1
+fi
+
+TEAM_FILE="$AGENTS_HOME/team.json"
+ROLE_FILE="$AGENTS_HOME/agents/$ROLE.md"
+COMMON_FILE="$AGENTS_HOME/agents.md"
+
+if ! python3 - "$TEAM_FILE" "$ROLE" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+raise SystemExit(0 if sys.argv[2] in data.get("roles", {}) else 1)
+PY
+then
+  echo "agent-runtime: unsupported role: $ROLE" >&2
+  exit 2
+fi
+
+if [ ! -r "$ROLE_FILE" ]; then
+  echo "agent-runtime: role file is not readable: $ROLE_FILE" >&2
+  exit 1
+fi
+
+LABEL="${LABEL:-$ROLE}"
+
+CONTROLLER_ROLE="${CONTROLLER_ROLE:-${HERDR_AGENT_ROLE:-}}"
+ROLE_POLICY="$(python3 - "$TEAM_FILE" "$ROLE" "$RUNTIME" "$MODEL" "$CONTROLLER_ROLE" "$TASK_TIER" "$ROUTING_EXCEPTION" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    team = json.load(handle)
+
+if team.get("version") != 4:
+    raise SystemExit("agent-runtime: team.json schema version must be 4")
+if team.get("runtime_order") != ["pi", "claude"]:
+    raise SystemExit("agent-runtime: invalid runtime_order")
+
+disabled_providers = team.get("disabled_model_providers", [])
+if (not isinstance(disabled_providers, list)
+        or any(not isinstance(provider, str) or not provider
+               or provider.strip() != provider or "/" in provider
+               for provider in disabled_providers)
+        or len(disabled_providers) != len(set(disabled_providers))):
+    raise SystemExit("agent-runtime: invalid disabled_model_providers")
+disabled_providers = set(disabled_providers)
+
+def model_provider(model):
+    return model.split("/", 1)[0] if isinstance(model, str) and "/" in model else None
+
+def provider_is_disabled(model):
+    return model_provider(model) in disabled_providers
+
+roles = team.get("roles")
+if not isinstance(roles, dict):
+    raise SystemExit("agent-runtime: roles must be an object")
+for name, config in roles.items():
+    if bool(config.get("may_vault_read", False)) != (name == "investigator"):
+        raise SystemExit(f"agent-runtime: invalid vault-read capability for {name}")
+    selection = config.get("model_selection")
+    if selection not in {"fixed", "controller"}:
+        raise SystemExit(f"agent-runtime: invalid model_selection for {name}")
+    models = config.get("models")
+    if not isinstance(models, dict) or not models:
+        raise SystemExit(f"agent-runtime: missing model allowlist for {name}")
+    for runtime, values in models.items():
+        if runtime not in {"pi", "claude"}:
+            raise SystemExit(f"agent-runtime: invalid runtime key for {name}: {runtime}")
+        if (not isinstance(values, list) or not values
+                or any(not isinstance(value, str) or not value for value in values)
+                or len(values) != len(set(values))):
+            raise SystemExit(f"agent-runtime: invalid ordered model allowlist for {name}/{runtime}")
+    routing = config.get("routing")
+    if selection == "fixed":
+        if routing is not None:
+            raise SystemExit(f"agent-runtime: fixed role must not define routing: {name}")
+        active_pairs = [
+            (runtime, model)
+            for runtime, values in models.items()
+            for model in values
+            if not provider_is_disabled(model)
+        ]
+        if not active_pairs:
+            raise SystemExit(f"agent-runtime: fixed role has no enabled model: {name}")
+        default_model = config.get("default_model")
+        if default_model and provider_is_disabled(default_model):
+            raise SystemExit(f"agent-runtime: fixed role default uses a disabled provider: {name}")
+    else:
+        if not isinstance(routing, dict) or set(routing) != {"standard", "critical"}:
+            raise SystemExit(f"agent-runtime: invalid routing tiers for {name}")
+        for tier_name, tier_route in routing.items():
+            if not isinstance(tier_route, dict) or set(tier_route) != {"primary", "alternates"}:
+                raise SystemExit(f"agent-runtime: invalid routing policy for {name}/{tier_name}")
+
+            def validate_pair(pair, location):
+                if not isinstance(pair, dict) or set(pair) != {"runtime", "model"}:
+                    raise SystemExit(f"agent-runtime: invalid routing pair for {name}/{location}")
+                pair_runtime = pair.get("runtime")
+                pair_model = pair.get("model")
+                if pair_model not in models.get(pair_runtime, []):
+                    raise SystemExit(f"agent-runtime: routing pair is outside the allowlist for {name}/{location}")
+                return pair_runtime, pair_model
+
+            primary = validate_pair(tier_route.get("primary"), f"{tier_name}/primary")
+            alternates = tier_route.get("alternates")
+            if not isinstance(alternates, list):
+                raise SystemExit(f"agent-runtime: invalid routing alternates for {name}/{tier_name}")
+            alternate_pairs = [
+                validate_pair(pair, f"{tier_name}/alternate") for pair in alternates
+            ]
+            if primary in alternate_pairs or len(alternate_pairs) != len(set(alternate_pairs)):
+                raise SystemExit(f"agent-runtime: duplicate routing pair for {name}/{tier_name}")
+    controllers = config.get("reports_to")
+    if isinstance(controllers, str):
+        controllers = [controllers]
+    if not isinstance(controllers, list) or not controllers:
+        raise SystemExit(f"agent-runtime: invalid reports_to for {name}")
+    for controller in controllers:
+        if controller != "human":
+            parent = roles.get(controller)
+            if not isinstance(parent, dict) or name not in parent.get("controls", []):
+                raise SystemExit(f"agent-runtime: invalid ownership for {controller}->{name}")
+    for child in config.get("controls", []):
+        if child not in roles:
+            raise SystemExit(f"agent-runtime: invalid ownership for {name}->{child}")
+        child_controllers = roles[child].get("reports_to")
+        if isinstance(child_controllers, str):
+            child_controllers = [child_controllers]
+        if name not in child_controllers:
+            raise SystemExit(f"agent-runtime: invalid ownership for {name}->{child}")
+
+configured_providers = {
+    model_provider(model)
+    for config in roles.values()
+    for values in config.get("models", {}).values()
+    for model in values
+    if model_provider(model)
+}
+unknown_disabled = disabled_providers - configured_providers
+if unknown_disabled:
+    raise SystemExit(
+        "agent-runtime: disabled_model_providers contains unknown providers: "
+        + ", ".join(sorted(unknown_disabled))
+    )
+
+role_name, requested_runtime, requested_model, controller_name, task_tier, routing_exception = sys.argv[2:8]
+role = roles[role_name]
+selection = role["model_selection"]
+models = role["models"]
+controllers = role.get("reports_to")
+if isinstance(controllers, str):
+    controllers = [controllers]
+if selection == "controller" and controller_name and controller_name not in controllers:
+    raise SystemExit(f"agent-runtime: {controller_name} does not control {role_name}")
+if selection == "fixed" and "human" not in controllers and controller_name not in controllers:
+    raise SystemExit(f"agent-runtime: {controller_name or 'unknown'} does not control {role_name}")
+if selection == "fixed":
+    if task_tier or routing_exception == "true":
+        raise SystemExit(f"agent-runtime: fixed role rejects task tier routing: {role_name}")
+    pairs = [(runtime, model) for runtime, values in models.items() for model in values]
+    default_model = role.get("default_model")
+    if not pairs:
+        raise SystemExit(f"agent-runtime: fixed role must configure at least one runtime/model pair: {role_name}")
+    if requested_model:
+        if requested_model == "auto":
+            raise SystemExit(f"agent-runtime: fixed role rejects --model auto: {role_name}")
+        matches = [
+            (candidate_runtime, candidate_model)
+            for candidate_runtime, candidate_model in pairs
+            if candidate_model == requested_model
+            and requested_runtime in {"auto", candidate_runtime}
+        ]
+        if len(matches) != 1:
+            raise SystemExit(
+                f"agent-runtime: model is not allowed for {role_name}/{requested_runtime}: {requested_model}"
+            )
+        runtime, model = matches[0]
+    else:
+        if default_model:
+            matches = [(candidate_runtime, candidate_model) for candidate_runtime, candidate_model in pairs if candidate_model == default_model]
+            if len(matches) != 1:
+                raise SystemExit(f"agent-runtime: invalid default_model for fixed role: {role_name}")
+            runtime, model = matches[0]
+        elif len(pairs) == 1:
+            runtime, model = pairs[0]
+        else:
+            raise SystemExit(f"agent-runtime: fixed role with multiple models requires default_model: {role_name}")
+        if requested_runtime not in {"auto", runtime}:
+            raise SystemExit(f"agent-runtime: fixed role rejects runtime override {requested_runtime}: {role_name}")
+    routing_resolution = "fixed"
+    routing_reason = "configured-fixed-model"
+else:
+    if task_tier not in {"standard", "critical"}:
+        raise SystemExit(f"agent-runtime: controller-selected role requires --task-tier standard or critical: {role_name}")
+    if requested_runtime not in {"pi", "claude"}:
+        raise SystemExit(f"agent-runtime: controller-selected role requires explicit --runtime pi or claude: {role_name}")
+    if not requested_model or requested_model == "auto":
+        raise SystemExit(f"agent-runtime: controller-selected role requires explicit --model: {role_name}")
+    if requested_model not in models.get(requested_runtime, []):
+        raise SystemExit(
+            f"agent-runtime: model is not allowed for {role_name}/{requested_runtime}: {requested_model}"
+        )
+    route = role["routing"][task_tier]
+    selected = (requested_runtime, requested_model)
+    primary = (route["primary"]["runtime"], route["primary"]["model"])
+    alternates = [
+        (pair["runtime"], pair["model"]) for pair in route["alternates"]
+    ]
+    if selected == primary:
+        if routing_exception == "true":
+            raise SystemExit(f"agent-runtime: routing exception is not valid for the primary model: {role_name}/{task_tier}")
+        if provider_is_disabled(primary[1]):
+            enabled_alternates = [
+                pair for pair in alternates if not provider_is_disabled(pair[1])
+            ]
+            if not enabled_alternates:
+                raise SystemExit(
+                    f"agent-runtime: no enabled alternate for disabled primary: "
+                    f"{role_name}/{task_tier} ({primary[1]})"
+                )
+            runtime, model = enabled_alternates[0]
+            routing_resolution = "disabled-primary-failover"
+            routing_reason = f"primary-provider-{model_provider(primary[1])}-disabled"
+            routing_exception = "true"
+            print(
+                f"agent-runtime: routing failover role={role_name} tier={task_tier} "
+                f"disabled_primary={primary[1]} selected={runtime}/{model}",
+                file=sys.stderr,
+            )
+        else:
+            runtime, model = selected
+            routing_resolution = "primary"
+            routing_reason = "configured-tier-primary"
+    elif selected in alternates:
+        if provider_is_disabled(requested_model):
+            raise SystemExit(
+                f"agent-runtime: model provider is disabled: {model_provider(requested_model)}"
+            )
+        if routing_exception != "true":
+            raise SystemExit(f"agent-runtime: alternate model requires --routing-exception: {role_name}/{task_tier}")
+        runtime, model = selected
+        routing_resolution = "explicit-alternate"
+        routing_reason = "controller-routing-exception"
+    else:
+        raise SystemExit(f"agent-runtime: model does not match routing policy for {role_name}/{task_tier}: {requested_runtime}/{requested_model}")
+
+if provider_is_disabled(model):
+    raise SystemExit(f"agent-runtime: model provider is disabled: {model_provider(model)}")
+
+print("\t".join([
+    role.get("repo_mode", "read_only"),
+    str(bool(role.get("may_local_commit", False))).lower(),
+    str(bool(role.get("may_authorized_push", False))).lower(),
+    str(bool(role.get("may_authorized_pr_create", False))).lower(),
+    str(bool(role.get("may_remote_deliver", False))).lower(),
+    str(bool(role.get("may_document_write", False))).lower(),
+    str(bool(role.get("may_vault_read", False))).lower(),
+    selection,
+    runtime,
+    model,
+    routing_resolution,
+    routing_reason,
+]))
+PY
+)"
+IFS=$'\t' read -r REPO_MODE MAY_LOCAL_COMMIT MAY_AUTHORIZED_PUSH MAY_AUTHORIZED_PR_CREATE MAY_REMOTE_DELIVER MAY_DOCUMENT_WRITE MAY_VAULT_READ MODEL_SELECTION RUNTIME MODEL ROUTING_RESOLUTION ROUTING_REASON <<< "$ROLE_POLICY"
+if [ "${HERDR_ROUTING_RESOLUTION:-}" = "disabled-primary-failover" ] \
+  && [ "$ROUTING_RESOLUTION" = "explicit-alternate" ]; then
+  ROUTING_RESOLUTION="$HERDR_ROUTING_RESOLUTION"
+  ROUTING_REASON="${HERDR_ROUTING_REASON:-disabled-primary-provider}"
+fi
+if [ "$ROUTING_RESOLUTION" = "disabled-primary-failover" ]; then
+  ROUTING_EXCEPTION="true"
+fi
+
+case "$KNOWLEDGE_SOURCE" in
+  repository)
+    if [ -n "$VAULT_READ_SCOPE" ]; then
+      echo "agent-runtime: --vault-read-scope requires --knowledge-source vault" >&2
+      exit 2
+    fi
+    ;;
+  vault)
+    if [ "$ROLE" != "investigator" ] || [ "$MAY_VAULT_READ" != "true" ]; then
+      echo "agent-runtime: scoped vault retrieval is allowed only for Investigator" >&2
+      exit 1
+    fi
+    if [ "$TASK_CLASS" != "investigation" ]; then
+      echo "agent-runtime: scoped vault retrieval requires --task-class investigation" >&2
+      exit 2
+    fi
+    if [ -z "$VAULT_PATH" ] || [ -z "$VAULT_READ_SCOPE" ]; then
+      echo "agent-runtime: configured vault path and --vault-read-scope are required" >&2
+      exit 2
+    fi
+    if ! VAULT_READ_SCOPE="$(python3 - "$VAULT_PATH" "$VAULT_READ_SCOPE" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+try:
+    vault = Path(sys.argv[1]).expanduser().resolve(strict=True)
+    requested = Path(sys.argv[2]).expanduser()
+    scope = (requested if requested.is_absolute() else vault / requested).resolve(strict=True)
+    scope.relative_to(vault)
+except (OSError, RuntimeError, ValueError):
+    raise SystemExit(1)
+if scope == vault or not os.access(scope, os.R_OK):
+    raise SystemExit(1)
+print(scope)
+PY
+)"; then
+      echo "agent-runtime: vault read scope must be a readable descendant of the configured vault root" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+DOCUMENT_ONLY="false"
+if [ "$TASK_CLASS" = "document" ] && [ "$MAY_DOCUMENT_WRITE" = "true" ]; then
+  REPO_MODE="write"
+  DOCUMENT_ONLY="true"
+fi
+
+if [ "$OPERATION" = "protected-sync" ]; then
+  REPO_MODE="read_only"
+  MAY_LOCAL_COMMIT="false"
+  MAY_AUTHORIZED_PUSH="false"
+  MAY_AUTHORIZED_PR_CREATE="false"
+  MAY_REMOTE_DELIVER="false"
+fi
+
+case "$REPO_MODE" in
+  read_only|write) ;;
+  *) echo "agent-runtime: invalid repo_mode for $ROLE: $REPO_MODE" >&2; exit 1 ;;
+esac
+
+case "$ROLE" in
+  coder|refactor)
+    if git -C "$CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      BRANCH="$(git -C "$CWD" branch --show-current)"
+      if [ "$OPERATION" = "protected-sync" ]; then
+        if [ "$BRANCH" != "$SYNC_BRANCH" ]; then
+          echo "agent-runtime: protected-sync must start on $SYNC_BRANCH, found '${BRANCH:-detached}'" >&2
+          exit 1
+        fi
+      else
+        case "$BRANCH" in
+          ""|main|master|dev|uat|prod)
+            echo "agent-runtime: $ROLE cannot start on protected or detached branch '${BRANCH:-detached}'" >&2
+            exit 1
+            ;;
+        esac
+      fi
+    else
+      echo "agent-runtime: $ROLE requires a Git worktree: $CWD" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+REAL_GIT="$(command -v git || true)"
+REAL_GH="$(command -v gh || true)"
+REAL_GLAB="$(command -v glab || true)"
+GUARD_DIR="$AGENTS_HOME/guard-bin"
+if { [ ! -x "$GUARD_DIR/git" ] || [ ! -x "$GUARD_DIR/gh" ] \
+  || [ ! -x "$GUARD_DIR/glab" ]; } \
+  && [ -d "$SCRIPT_DIR/guard-bin" ]; then
+  GUARD_DIR="$SCRIPT_DIR/guard-bin"
+fi
+if [ ! -x "$GUARD_DIR/git" ] || [ ! -x "$GUARD_DIR/gh" ] \
+  || [ ! -x "$GUARD_DIR/glab" ]; then
+  echo "agent-runtime: command guards are missing; run setup_harness.sh" >&2
+  exit 1
+fi
+export HERDR_REAL_GIT="$REAL_GIT"
+export HERDR_REAL_GH="$REAL_GH"
+export HERDR_REAL_GLAB="$REAL_GLAB"
+export HERDR_AGENT_ROLE="$ROLE"
+export HERDR_REPO_MODE="$REPO_MODE"
+export HERDR_MAY_LOCAL_COMMIT="$MAY_LOCAL_COMMIT"
+export HERDR_MAY_AUTHORIZED_PUSH="$MAY_AUTHORIZED_PUSH"
+export HERDR_MAY_AUTHORIZED_PR_CREATE="$MAY_AUTHORIZED_PR_CREATE"
+export HERDR_MAY_REMOTE_DELIVER="$MAY_REMOTE_DELIVER"
+export HERDR_MAY_DOCUMENT_WRITE="$MAY_DOCUMENT_WRITE"
+export HERDR_MAY_VAULT_READ="$MAY_VAULT_READ"
+export HERDR_DOCUMENT_ONLY="$DOCUMENT_ONLY"
+export HERDR_OPERATION_MODE="$OPERATION"
+export HERDR_COMMIT_MODE="$COMMIT_MODE"
+export HERDR_VERIFICATION_PROFILE="${VERIFICATION_PROFILE/-/_}"
+export HERDR_PROTECTED_SYNC_BRANCH="$SYNC_BRANCH"
+export HERDR_TASK_TIER="$TASK_TIER"
+export HERDR_ROUTING_EXCEPTION="$ROUTING_EXCEPTION"
+export HERDR_VOICE_NOTIFY_BIN="$SCRIPT_DIR/voice-notify"
+VOICE_MODE="${HERDR_VOICE_MODE:-off}"
+case "$VOICE_MODE" in
+  on) HERDR_VOICE_NOTIFY=1 ;;
+  off|"") HERDR_VOICE_NOTIFY=0 ;;
+  *) echo "agent-runtime: voice mode must be on or off" >&2; exit 2 ;;
+esac
+export HERDR_VOICE_MODE="$VOICE_MODE"
+# The role is part of the environment so extensions can name it in logs and
+# refuse role-specific commands.
+export HERDR_ROLE="$ROLE"
+export HERDR_VOICE_NOTIFY
+export PATH="$GUARD_DIR:$PATH"
+
+if [ "$ROLE" = "orchestrator" ] && [ "$HERDR_VOICE_NOTIFY" = "1" ] \
+  && [ -x "$HERDR_VOICE_NOTIFY_BIN" ]; then
+  # A killed pane never releases the voice, so a fresh session would find a dead
+  # owner and stay silent. Clear it first, then claim.
+  "$HERDR_VOICE_NOTIFY_BIN" release >/dev/null 2>&1 || true
+  "$HERDR_VOICE_NOTIFY_BIN" init >/dev/null 2>&1 || true
+fi
+
+pi_healthy() {
+  command -v pi >/dev/null 2>&1 && pi --version >/dev/null 2>&1
+}
+
+claude_healthy() {
+  command -v claude >/dev/null 2>&1 && claude --version >/dev/null 2>&1
+}
+
+if [ "$RUNTIME" = "pi" ] && ! pi_healthy; then
+  echo "agent-runtime: Pi is missing or failed its health check" >&2
+  exit 1
+elif [ "$RUNTIME" = "claude" ] && ! claude_healthy; then
+  echo "agent-runtime: Claude is missing or failed its health check" >&2
+  exit 1
+fi
+
+COMMON_PROMPT=""
+if [ -r "$COMMON_FILE" ]; then
+  COMMON_PROMPT="$(<"$COMMON_FILE")"
+fi
+ROLE_PROMPT="$(<"$ROLE_FILE")"
+COMBINED_PROMPT="$COMMON_PROMPT
+
+$ROLE_PROMPT"
+
+POLICY_PROMPT="Runtime-enforced role policy:
+- role=$ROLE
+- runtime=$RUNTIME
+- model=$MODEL
+- model_selection=$MODEL_SELECTION
+- controller_role=${CONTROLLER_ROLE:-none}
+- staffing=$STAFFING
+- task_class=$TASK_CLASS
+- verification_profile=$VERIFICATION_PROFILE
+- knowledge_source=$KNOWLEDGE_SOURCE
+- vault_read_scope=${VAULT_READ_SCOPE:-none}
+- task_tier=${TASK_TIER:-none}
+- routing_exception=$ROUTING_EXCEPTION
+- routing_resolution=$ROUTING_RESOLUTION
+- routing_reason=$ROUTING_REASON
+- document_only=$DOCUMENT_ONLY
+- vault_path=${VAULT_PATH:-none}
+- activity_log=${ACTIVITY_LOG:-none}
+- repo_mode=$REPO_MODE
+- may_local_commit=$MAY_LOCAL_COMMIT
+- may_authorized_push=$MAY_AUTHORIZED_PUSH
+- may_authorized_pr_create=$MAY_AUTHORIZED_PR_CREATE
+- may_remote_deliver=$MAY_REMOTE_DELIVER
+- may_vault_read=$MAY_VAULT_READ
+- operation=$OPERATION
+- commit_mode=$COMMIT_MODE
+- protected_sync_branch=$SYNC_BRANCH
+
+Do not bypass role restrictions through shell redirection, scripting, absolute executable paths, alternate CLIs, or indirect delegation. Read-only roles must not modify project files. Supervisor has only the token-gated Git exceptions below; other read-only roles must not mutate Git state. Scoped vault retrieval is valid only when knowledge_source=vault, may_vault_read=true, and vault_read_scope is a resolved descendant of the configured vault root. In that mode, Investigator may read only the assigned scope and must not scan the vault root, escape through symlinks, inspect excluded paths, or mutate vault content. In document mode, the Documenter may write only the Human-approved Markdown/text/note files in the task's Allowed files; it must not edit source code, commit, push, or perform any other Git mutation. The configured activity log must be an OKF reserved log.md: no frontmatter, a # Update Log heading, ISO date headings, and standard Markdown links. Any other new Markdown concept must have parseable YAML frontmatter with a non-empty type. PM remains read-only and must delegate document writing to Documenter. Protected-sync mode remains read-only and may run only the exact local branch switch and fast-forward pull for the approved protected branch; it must not edit files, commit, push, merge, rebase, fetch separately, or perform any other mutation. The sole bootstrap exception is that Supervisor may call spawn-agent with the approved Base branch and Work branch; spawn-agent performs the bounded branch creation or switch before Worker startup. Human authorization tokens authorize Supervisor for supervised execution, or the original Coder or Refactor for a direct path, to perform exactly one matching push or PR create through the controller chain; they do not require the Human to run Git/GitHub. Only the selected Git executor with the corresponding capability may push through agent_authorized_push or create a PR through agent_authorized_pr_create after the matching exact Human token is relayed. The guards require matching local and remote commits, permit PR base=dev only, and continue to block PR edits, merges, and every other remote mutation."
+COMBINED_PROMPT="$COMBINED_PROMPT
+
+$POLICY_PROMPT"
+if [ "$ROLE" = "supervisor" ] && [ "$MAY_LOCAL_COMMIT" = "true" ]; then
+  COMBINED_PROMPT="$COMBINED_PROMPT
+
+Supervised commit exception: after the selected Verifiers PASS the exact frozen
+staged diff and Human authorization, Supervisor may call
+agent_authorized_commit. Supervisor may not edit files."
+  if [ "$MAY_AUTHORIZED_PUSH" = "true" ] && [ "$MAY_AUTHORIZED_PR_CREATE" = "true" ]; then
+    COMBINED_PROMPT="$COMBINED_PROMPT
+
+Supervised Git delivery: after separate exact Human authorizations, Supervisor
+may call agent_authorized_push and agent_authorized_pr_create for the verified
+current commit. No PR update, review, close, merge, or other remote mutation."
+  fi
+fi
+
+CLAUDE_VOICE_SETTINGS=""
+if [ "$RUNTIME" = "claude" ] \
+  && { [ "$ROLE" = "orchestrator" ] || [ "$ROLE" = "pm" ]; } \
+  && [ "$(uname -s)" = "Darwin" ] \
+  && [ -x "$HERDR_VOICE_NOTIFY_BIN" ] \
+  && case "${HERDR_VOICE_NOTIFY:-0}" in 0|false|no|off) false ;; *) true ;; esac; then
+  CLAUDE_VOICE_SETTINGS="$(python3 - "$HERDR_VOICE_NOTIFY_BIN" <<'PY'
+import json
+import shlex
+import sys
+
+helper = shlex.quote(sys.argv[1])
+print(json.dumps({
+    "hooks": {
+        "UserPromptSubmit": [{
+            "hooks": [{"type": "command", "command": f"{helper} claim"}]
+        }],
+        "PermissionRequest": [{
+            "hooks": [{"type": "command", "command": f"{helper} permission"}]
+        }],
+        "Stop": [{
+            "hooks": [{"type": "command", "command": f"{helper} summary"}]
+        }],
+    }
+}))
+PY
+)"
+fi
+
+cd "$CWD"
+echo "agent-runtime: role=$ROLE runtime=$RUNTIME model=$MODEL label=$LABEL cwd=$CWD" >&2
+
+case "$RUNTIME" in
+  pi)
+    if [ "$REPO_MODE" = "write" ]; then
+      cmd=(pi --name "$LABEL" --append-system-prompt "$COMBINED_PROMPT")
+    else
+      cmd=(pi --name "$LABEL" --system-prompt "$COMBINED_PROMPT" --exclude-tools edit,write)
+    fi
+    if [ -r "$AGENTS_HOME/extensions/auto-compact.ts" ]; then
+      cmd+=(--extension "$AGENTS_HOME/extensions/auto-compact.ts")
+    fi
+    # Prompt rules do not enforce themselves: this one refuses blocking waits
+    # (hc wait, herdr-core wait, sleep) before the tool runs.
+    if [ -r "$AGENTS_HOME/extensions/role-guard.ts" ]; then
+      cmd+=(--extension "$AGENTS_HOME/extensions/role-guard.ts")
+    fi
+    if { [ "$ROLE" = "orchestrator" ] || [ "$ROLE" = "pm" ]; } \
+      && [ -r "$AGENTS_HOME/extensions/voice-notify.ts" ]; then
+      cmd+=(--extension "$AGENTS_HOME/extensions/voice-notify.ts")
+    fi
+    if [ "$ROLE" = "orchestrator" ] && [ -r "$AGENTS_HOME/extensions/orchestrator-shutdown.ts" ]; then
+      cmd+=(--extension "$AGENTS_HOME/extensions/orchestrator-shutdown.ts")
+    fi
+    [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
+    [ -n "$INITIAL_PROMPT" ] && cmd+=("$INITIAL_PROMPT")
+    exec "${cmd[@]}"
+    ;;
+  claude)
+    CLAUDE_AGENT="herdr-$ROLE"
+    if [ ! -r "$HOME/.claude/agents/$CLAUDE_AGENT.md" ]; then
+      echo "agent-runtime: Claude role is not installed: $HOME/.claude/agents/$CLAUDE_AGENT.md" >&2
+      echo "agent-runtime: run setup_harness.sh" >&2
+      exit 1
+    fi
+    # Claude Code stops on its "do you trust this folder" dialog in any folder
+    # it has not seen, and an unattended team role cannot answer it: the agent
+    # sits at the prompt doing nothing. Register the launch folder and its git
+    # root as trusted first — the same record accepting the dialog writes.
+    # HERDR_CLAUDE_TRUST=0 opts out.
+    if [ "${HERDR_CLAUDE_TRUST:-1}" = "1" ]; then
+      python3 - "$CWD" <<'PYTRUST' || true
+import json, os, subprocess, sys
+
+cwd = os.path.realpath(sys.argv[1])
+paths = {cwd}
+try:
+    common = subprocess.run(
+        ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+        capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+    if common:
+        # A worktree's common dir lives in the main checkout, and that is the
+        # path Claude Code ends up keying on.
+        common_path = os.path.realpath(os.path.join(cwd, common))
+        paths.add(os.path.dirname(common_path))
+except Exception:
+    pass
+
+config = os.path.expanduser("~/.claude.json")
+try:
+    with open(config) as handle:
+        data = json.load(handle)
+except Exception:
+    data = {}
+projects = data.setdefault("projects", {})
+changed = False
+for path in paths:
+    entry = projects.setdefault(path, {})
+    if not entry.get("hasTrustDialogAccepted"):
+        entry["hasTrustDialogAccepted"] = True
+        changed = True
+if changed:
+    tmp = config + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump(data, handle)
+    os.replace(tmp, config)
+PYTRUST
+    fi
+    # Capability scope for an unattended role. Policy requires
+    # --dangerously-skip-permissions in this adapter (nobody sits at the pane),
+    # and in bypassPermissions mode allow rules are ignored while DENY rules
+    # still bind — so the scope is expressed as denies: low-risk local work
+    # keeps running, anything that reaches the network, escalates privilege,
+    # destroys data, touches cloud/containers, or writes outside the working
+    # directory is refused and must be delegated to the Human through PM.
+    # HERDR_CLAUDE_POLICY=off drops the denies (tests only).
+    CLAUDE_SETTINGS="$CLAUDE_VOICE_SETTINGS"
+    if [ "${HERDR_CLAUDE_POLICY:-on}" != "off" ]; then
+      CLAUDE_SETTINGS="$(python3 - "$ROLE" "$CLAUDE_VOICE_SETTINGS" <<'PYPOLICY'
+import json, sys
+
+role, voice = sys.argv[1:3]
+settings = {}
+if voice.strip():
+    try:
+        settings.update(json.loads(voice))
+    except ValueError:
+        pass
+
+deny = [
+    # network + exfiltration
+    "WebFetch", "WebSearch",
+    "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ncat:*)",
+    "Bash(ssh:*)", "Bash(scp:*)", "Bash(rsync:*)", "Bash(telnet:*)", "Bash(ftp:*)",
+    # privilege + host control
+    "Bash(sudo:*)", "Bash(su:*)", "Bash(launchctl:*)",
+    "Bash(shutdown:*)", "Bash(reboot:*)", "Bash(killall:*)",
+    # destructive filesystem
+    "Bash(rm -rf:*)", "Bash(rm -fr:*)", "Bash(chmod 777:*)",
+    "Bash(mkfs:*)", "Bash(dd if=:*)",
+    # cloud, containers, cluster
+    "Bash(docker:*)", "Bash(podman:*)", "Bash(kubectl:*)", "Bash(helm:*)",
+    "Bash(aws:*)", "Bash(gcloud:*)", "Bash(az:*)", "Bash(terraform:*)",
+    # blocking waits — coordination is push-based (Hard Rule 4)
+    "Bash(hc wait:*)", "Bash(herdr-core wait:*)", "Bash(sleep:*)",
+    # global package/state mutation
+    "Bash(brew:*)", "Bash(pip install:*)", "Bash(pip3 install:*)",
+    "Bash(npm install -g:*)", "Bash(npm publish:*)",
+    "Bash(crontab:*)", "Bash(systemctl:*)",
+    # secrets
+    "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.config/gh/**)",
+    "Read(**/.env)", "Read(**/.env.*)",
+    "Edit(~/.ssh/**)", "Edit(~/.aws/**)",
+]
+if role not in ("coder", "refactor"):
+    deny += ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+
+permissions = settings.setdefault("permissions", {})
+permissions["deny"] = list(dict.fromkeys(permissions.get("deny", []) + deny))
+permissions["blockWritesOutsideWorkingDirectories"] = True
+print(json.dumps(settings))
+PYPOLICY
+)"
+    fi
+    if [ "$REPO_MODE" = "write" ]; then
+      cmd=(claude --dangerously-skip-permissions --agent "$CLAUDE_AGENT" --name "$LABEL")
+      cmd+=(--append-system-prompt "$COMMON_PROMPT
+
+$POLICY_PROMPT")
+    else
+      cmd=(claude --dangerously-skip-permissions \
+        --disallowedTools Edit Write NotebookEdit \
+        --agent "$CLAUDE_AGENT" --name "$LABEL" \
+        --system-prompt "$COMBINED_PROMPT")
+    fi
+    [ -n "$MODEL" ] && cmd+=(--model "$MODEL")
+    [ -n "$CLAUDE_SETTINGS" ] && cmd+=(--settings "$CLAUDE_SETTINGS")
+    [ -n "$INITIAL_PROMPT" ] && cmd+=("$INITIAL_PROMPT")
+    exec "${cmd[@]}"
+    ;;
+esac

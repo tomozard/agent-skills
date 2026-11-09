@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Read and write the per-machine config for the Herdr app team launcher.
+
+`/hteam setup` (and `hteam-config set`) write this file; `bin/herdr-app-team` reads
+it so a Human does not have to export long env vars.
+
+Precedence is flag > env > this file > built-in default: `env` skips any key whose
+environment variable is already set, so a shell export still wins.
+
+Config: ~/.config/herdr-team/hteam.yaml (override with HERDR_TEAM_CONFIG).
+Exit codes: 0 ok, 2 invalid value/unknown key, 3 unreadable/invalid config.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import sys
+import tempfile
+from pathlib import Path
+
+# config key -> (env var, default factory)
+KEYS = {
+    "space": ("HERDR_TEAM_SPACE", lambda d: "Herdr Team"),
+    "folder": ("HERDR_TEAM_CWD", lambda d: str(Path.home() / "Workspaces")),
+    "voice": ("HERDR_VOICE_MODE", lambda d: "off"),
+    "watch": ("HERDR_TEAM_WATCH", lambda d: "off"),
+    "repo": ("HERDR_TEAM_REPO", lambda d: detected_repo()),
+    "registry": ("HERDR_TEAM_REGISTRY", lambda d: str(Path(d["folder"]) / ".agents" / "workspace-registry.yaml")),
+    "vault": ("HERDR_TEAM_VAULT", lambda d: str(Path(d["folder"]) / "vault")),
+    "activity_log": ("HERDR_TEAM_ACTIVITY_LOG", lambda d: str(Path(d["vault"]) / "log.md")),
+}
+
+ENUMS = {"voice": ("on", "off"), "watch": ("on", "off")}
+ORDER = ("space", "folder", "voice", "watch", "repo", "registry", "vault", "activity_log")
+
+HEADER = """# Herdr app agent team — per-machine launcher config.
+# Written by `/hteam setup` (or `hteam-config set`). Env vars and flags win over
+# these values; delete a line to fall back to the built-in default.
+"""
+
+
+def detected_repo() -> str:
+    for candidate in (Path.home() / "Workspaces" / "project-scaffold",
+                      Path.home() / "project-scaffold"):
+        if (candidate / "bin" / "agent-runtime").is_file():
+            return str(candidate)
+    return str(Path.home() / "Workspaces" / "project-scaffold")
+
+
+def config_path() -> Path:
+    override = os.environ.get("HERDR_TEAM_CONFIG")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".config" / "herdr-team" / "hteam.yaml"
+
+
+def fail(message: str, code: int = 2) -> "None":
+    print(f"hteam-config: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def parse(raw: str) -> dict:
+    values = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            fail(f"invalid line in config: {line!r}", 3)
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key not in KEYS:
+            continue  # forward compatible: ignore unknown keys
+        values[key] = value
+    return values
+
+
+def load() -> dict:
+    path = config_path()
+    if not path.is_file():
+        return {}
+    try:
+        return parse(path.read_text())
+    except OSError as error:
+        fail(f"cannot read {path}: {error}", 3)
+    return {}
+
+
+def effective(stored: dict | None = None) -> dict:
+    """Defaults, then the config file, then nothing from env (callers decide)."""
+    stored = load() if stored is None else stored
+    result = {}
+    for key in ORDER:
+        if key in stored:
+            result[key] = normalise(key, stored[key])  # a bad file must not reach a launcher
+        else:
+            result[key] = KEYS[key][1](result)
+    return result
+
+
+def normalise(key: str, value: str) -> str:
+    if key not in KEYS:
+        fail(f"unknown key {key!r} (one of: {', '.join(ORDER)})")
+    value = value.strip()
+    if key in ENUMS:
+        lowered = value.lower()
+        if lowered not in ENUMS[key]:
+            fail(f"{key} must be one of {', '.join(ENUMS[key])}, got {value!r}")
+        return lowered
+    if key == "watch":  # pragma: no cover - covered by ENUMS above
+        return value
+    if not value:
+        fail(f"{key} must not be empty")
+    return value
+
+
+def validate(values: dict) -> dict:
+    return {key: normalise(key, values[key]) for key in ORDER if key in values}
+
+
+def write_store(values: dict) -> Path:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = [HEADER.rstrip(), ""]
+    body += [f"{key}: {values[key]}" for key in ORDER if key in values]
+    payload = "\n".join(body) + "\n"
+    handle = tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False, prefix=".hteam.", suffix=".tmp")
+    try:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    finally:
+        handle.close()
+    os.replace(handle.name, path)
+    return path
+
+
+def cmd_show(args) -> int:
+    values = effective()
+    stored = load()
+    if args.json:
+        print(json.dumps({k: values[k] for k in ORDER}, indent=2))
+        return 0
+    path = config_path()
+    print(f"config: {path} {'(missing — defaults shown)' if not stored else ''}")
+    for key in ORDER:
+        source = "file" if key in stored else "default"
+        print(f"  {key:13s} {values[key]}  [{source}]")
+    return 0
+
+
+def cmd_get(args) -> int:
+    values = effective()
+    missing = [key for key in args.keys if key not in values]
+    if missing:
+        fail(f"unknown key {missing[0]!r} (one of: {', '.join(ORDER)})")
+    for key in args.keys:
+        print(values[key])
+    return 0
+
+
+def cmd_env(args) -> int:
+    """Print shell assignments for keys whose env var is not already set."""
+    values = effective()
+    for key in ORDER:
+        env_name, _ = KEYS[key]
+        if os.environ.get(env_name):
+            continue  # env wins over the file
+        value = values[key]
+        if key == "watch":
+            value = "1" if value == "on" else "0"
+        print(f"export {env_name}={shlex.quote(value)}")
+    return 0
+
+
+def cmd_set(args) -> int:
+    if len(args.pairs) % 2 != 0:
+        fail("set needs KEY VALUE pairs")
+    stored = load()  # keep unrelated keys; unset keys stay absent (default used)
+    for index in range(0, len(args.pairs), 2):
+        key = args.pairs[index]
+        stored[key] = normalise(key, args.pairs[index + 1])
+    validate(effective(stored))  # coherence check (derived paths, enums)
+    path = write_store({key: stored[key] for key in ORDER if key in stored})
+    print(f"hteam-config: wrote {path}")
+    return 0
+
+
+def cmd_write(args) -> int:
+    try:
+        payload = json.loads(args.json)
+    except (TypeError, ValueError) as error:
+        fail(f"--json is not valid JSON: {error}")
+    if not isinstance(payload, dict):
+        fail("--json must be an object of key: value")
+    values = validate(payload)
+    path = write_store(values)
+    print(f"hteam-config: wrote {path}")
+    return 0
+
+
+def cmd_validate(args) -> int:
+    values = validate(effective())
+    for key in ORDER:
+        print(f"  ok  {key:13s} {values[key]}")
+    print("hteam-config: ok")
+    return 0
+
+
+def main(argv) -> int:
+    parser = argparse.ArgumentParser(prog="hteam-config", description=__doc__.splitlines()[0])
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    show = subs.add_parser("show", help="show effective values and where each came from")
+    show.add_argument("--json", action="store_true")
+    show.set_defaults(func=cmd_show)
+
+    get = subs.add_parser("get", help="print one or more effective values")
+    get.add_argument("keys", nargs="+")
+    get.set_defaults(func=cmd_get)
+
+    env = subs.add_parser("env", help="print shell exports for unset keys (for the launchers)")
+    env.set_defaults(func=cmd_env)
+
+    setter = subs.add_parser("set", help="set KEY VALUE pairs, keeping the rest")
+    setter.add_argument("pairs", nargs="+")
+    setter.set_defaults(func=cmd_set)
+
+    writer = subs.add_parser("write", help="replace the file from a JSON object")
+    writer.add_argument("--json", required=True)
+    writer.set_defaults(func=cmd_write)
+
+    val = subs.add_parser("validate", help="validate the stored file")
+    val.set_defaults(func=cmd_validate)
+
+    path = subs.add_parser("path", help="print the config path")
+    path.set_defaults(func=lambda args: (print(config_path()), 0)[1])
+
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except SystemExit as exit_:
+        return int(exit_.code or 0)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

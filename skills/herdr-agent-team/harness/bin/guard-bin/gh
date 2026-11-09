@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+REAL_GH="${HERDR_REAL_GH:-}"
+REAL_GIT="${HERDR_REAL_GIT:-/usr/bin/git}"
+ROLE="${HERDR_AGENT_ROLE:-unknown}"
+MAY_AUTHORIZED_PR_CREATE="${HERDR_MAY_AUTHORIZED_PR_CREATE:-false}"
+MAY_REMOTE="${HERDR_MAY_REMOTE_DELIVER:-false}"
+PR_AUTHORIZATION="${HERDR_PR_CREATE_AUTHORIZATION:-}"
+PR_BASE="${HERDR_PR_CREATE_BASE:-}"
+PR_HEAD="${HERDR_PR_CREATE_HEAD:-}"
+PR_COMMIT="${HERDR_PR_CREATE_COMMIT:-}"
+
+if [ -z "$REAL_GH" ]; then
+  echo "gh: real executable is unavailable" >&2
+  exit 127
+fi
+
+# GitHub inspection is executor evidence, not PM discovery. PM must use the
+# pushed task/commit evidence and forward Human delivery tokens without
+# reopening PR state after a child has completed.
+if [ "$ROLE" = "pm" ]; then
+  echo "gh: blocked by Herdr role policy: role=pm GitHub access is executor-only" >&2
+  exit 126
+fi
+
+deny() {
+  echo "gh: blocked by Herdr role policy: role=$ROLE command=$1" >&2
+  exit 126
+}
+
+command_name="${1:-}"
+subcommand="${2:-}"
+authorized_pr_create=false
+
+if [ "$MAY_REMOTE" != "true" ] \
+  && [ "$command_name" = "pr" ] \
+  && [ "$subcommand" = "create" ]; then
+  if [ "$MAY_AUTHORIZED_PR_CREATE" != "true" ]; then
+    deny "pr create"
+  fi
+  case "$ROLE" in
+    supervisor|coder|refactor) ;;
+    *) deny "authorized pr create role" ;;
+  esac
+
+  if [ "$PR_AUTHORIZATION" != "APPROVE_PR_DEV" ] || [ "$PR_BASE" != "dev" ]; then
+    deny "pr create authorization"
+  fi
+  auth_head="$PR_HEAD"
+  auth_commit="$PR_COMMIT"
+  if [ -z "$auth_head" ] || [ "${#auth_commit}" -ne 40 ]; then
+    deny "pr create authorization"
+  fi
+  case "$auth_commit" in
+    *[!0-9a-fA-F]*) deny "pr create authorization" ;;
+  esac
+  case "$auth_head" in
+    main|master|dev|uat|prod)
+      deny "protected pr head"
+      ;;
+  esac
+
+  current_branch="$($REAL_GIT branch --show-current)"
+  current_commit="$($REAL_GIT rev-parse HEAD)"
+  if [ "$current_branch" != "$auth_head" ] || [ "$current_commit" != "$auth_commit" ]; then
+    deny "pr create branch or commit mismatch"
+  fi
+
+  remote_line=""
+  if ! remote_line="$($REAL_GIT ls-remote --exit-code origin "refs/heads/$auth_head" 2>/dev/null)"; then
+    deny "pr create remote branch"
+  fi
+  remote_commit=""
+  remote_ref=""
+  read -r remote_commit remote_ref <<< "$remote_line" || true
+  if [ "$remote_commit" != "$auth_commit" ] \
+    || [ "$remote_ref" != "refs/heads/$auth_head" ]; then
+    deny "pr create remote commit mismatch"
+  fi
+
+  if [ "$#" -ne 10 ] \
+    || [ "$3" != "--base" ] || [ "$4" != "dev" ] \
+    || [ "$5" != "--head" ] || [ "$6" != "$auth_head" ] \
+    || [ "$7" != "--title" ] || [ -z "$8" ] \
+    || [ "$9" != "--body-file" ] || [ ! -r "${10}" ]; then
+    deny "pr create shape"
+  fi
+  authorized_pr_create=true
+fi
+
+if [ "$MAY_REMOTE" != "true" ]; then
+  case "$command_name:$subcommand" in
+    pr:list|pr:view|pr:checks|pr:status|repo:view)
+      ;;
+    pr:create)
+      [ "$authorized_pr_create" = true ] || deny "$command_name $subcommand"
+      ;;
+    pr:edit|pr:merge|pr:close|pr:reopen|pr:comment|pr:review|\
+    issue:create|issue:edit|issue:close|issue:reopen|issue:comment|\
+    release:create|release:edit|release:delete|release:upload|\
+    workflow:run|workflow:enable|workflow:disable|\
+    repo:create|repo:delete|repo:archive|repo:rename|\
+    secret:*|variable:*)
+      deny "$command_name $subcommand"
+      ;;
+  esac
+
+  if [ "$command_name" = "api" ]; then
+    for arg in "$@"; do
+      case "$arg" in
+        -X|--method|-f|--raw-field|-F|--field|--input|--method=*|--raw-field=*|--field=*|--input=*)
+          deny "api mutation"
+          ;;
+      esac
+    done
+  fi
+fi
+
+exec "$REAL_GH" "$@"

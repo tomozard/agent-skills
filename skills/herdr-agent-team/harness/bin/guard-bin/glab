@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+REAL_GLAB="${HERDR_REAL_GLAB:-}"
+REAL_GIT="${HERDR_REAL_GIT:-/usr/bin/git}"
+ROLE="${HERDR_AGENT_ROLE:-unknown}"
+MAY_AUTHORIZED_PR_CREATE="${HERDR_MAY_AUTHORIZED_PR_CREATE:-false}"
+PR_AUTHORIZATION="${HERDR_PR_CREATE_AUTHORIZATION:-}"
+PR_BASE="${HERDR_PR_CREATE_BASE:-}"
+PR_HEAD="${HERDR_PR_CREATE_HEAD:-}"
+PR_COMMIT="${HERDR_PR_CREATE_COMMIT:-}"
+PR_BODY_FILE="${HERDR_PR_CREATE_BODY_FILE:-}"
+
+deny() {
+  echo "glab: blocked by Herdr role policy: role=$ROLE command=$1" >&2
+  exit 126
+}
+
+if [ -z "$REAL_GLAB" ] || [ ! -x "$REAL_GLAB" ]; then
+  echo "glab: real executable is unavailable" >&2
+  exit 127
+fi
+
+if [ "$ROLE" = "pm" ]; then
+  deny "GitLab access is executor-only"
+fi
+
+case "${1:-}:${2:-}" in
+  mr:create)
+    [ "$MAY_AUTHORIZED_PR_CREATE" = "true" ] || deny "mr create capability"
+    case "$ROLE" in
+      supervisor|coder|refactor) ;;
+      *) deny "mr create role" ;;
+    esac
+    [ "$PR_AUTHORIZATION" = "APPROVE_PR_DEV" ] \
+      && [ "$PR_BASE" = "dev" ] || deny "mr create authorization"
+    [ -n "$PR_HEAD" ] && [ "${#PR_COMMIT}" -eq 40 ] \
+      || deny "mr create authorization"
+    case "$PR_COMMIT" in
+      *[!0-9a-fA-F]*) deny "mr create authorization" ;;
+    esac
+    case "$PR_HEAD" in
+      main|master|dev|uat|prod) deny "protected mr head" ;;
+    esac
+
+    [ -n "$PR_BODY_FILE" ] && [ -s "$PR_BODY_FILE" ] \
+      && [ -r "$PR_BODY_FILE" ] || deny "mr body file"
+    remote_url="$($REAL_GIT remote get-url origin)" || deny "origin remote"
+    case "$remote_url" in
+      *://*)
+        remote_host="${remote_url#*://}"
+        remote_host="${remote_host%%/*}"
+        remote_host="${remote_host##*@}"
+        remote_host="${remote_host%%:*}"
+        ;;
+      *@*:*)
+        remote_host="${remote_url#*@}"
+        remote_host="${remote_host%%:*}"
+        ;;
+      *) deny "origin remote" ;;
+    esac
+    case "$remote_host" in
+      *gitlab*|*git-lab*) ;;
+      *) deny "origin is not GitLab" ;;
+    esac
+    if [ "$#" -ne 13 ] \
+      || [ "$3" != "--repo" ] || [ "$4" != "$remote_url" ] \
+      || [ "$5" != "--source-branch" ] || [ "$6" != "$PR_HEAD" ] \
+      || [ "$7" != "--target-branch" ] || [ "$8" != "dev" ] \
+      || [ "$9" != "--title" ] || [ -z "${10}" ] \
+      || [ "${11}" != "--description" ] \
+      || [ "${12}" != "$(cat "$PR_BODY_FILE")" ] \
+      || [ "${13}" != "--yes" ]; then
+      deny "mr create shape"
+    fi
+
+    current_branch="$($REAL_GIT branch --show-current)"
+    current_commit="$($REAL_GIT rev-parse HEAD)"
+    if [ "$current_branch" != "$PR_HEAD" ] \
+      || [ "$current_commit" != "$PR_COMMIT" ]; then
+      deny "mr create branch or commit mismatch"
+    fi
+    remote_line=""
+    if ! remote_line="$($REAL_GIT ls-remote --exit-code origin "refs/heads/$PR_HEAD" 2>/dev/null)"; then
+      deny "mr create remote branch"
+    fi
+    remote_commit=""
+    remote_ref=""
+    read -r remote_commit remote_ref <<< "$remote_line" || true
+    if [ "$remote_commit" != "$PR_COMMIT" ] \
+      || [ "$remote_ref" != "refs/heads/$PR_HEAD" ]; then
+      deny "mr create remote commit mismatch"
+    fi
+    unset GITLAB_REPO GITLAB_URI GL_HOST GITLAB_HEAD_REPO
+    export GITLAB_HOST="$remote_host" GITLAB_API_HOST="$remote_host"
+    ;;
+  mr:list|mr:view|repo:view|auth:status|--version:|version:|--help:|help:*) ;;
+  *) deny "${1:-} ${2:-}" ;;
+esac
+
+exec "$REAL_GLAB" "$@"

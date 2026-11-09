@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Durable task board — thin shim.
+#
+# The board itself lives in the agent-skills skill, which is the single source
+# for this tooling (installed with
+# `npx skills add tomozard/agent-skills/skills/herdr-agent-team`). The shim
+# adds nothing but a clear error when the skill is missing, so the two copies
+# cannot drift apart again.
+#
+# Usage and exit codes are the skill's: `task-board --help`.
+
+set -euo pipefail
+
+SCRIPTS="${HERDR_AGENT_TEAM_SCRIPTS:-$HOME/.agents/skills/herdr-agent-team/scripts}"
+
+if [ ! -x "$SCRIPTS/task-board" ]; then
+  echo "task-board: the agent-skills task board is not installed" >&2
+  echo "  expected: $SCRIPTS/task-board" >&2
+  echo "  install : npx skills add tomozard/agent-skills/skills/herdr-agent-team" >&2
+  exit 3
+fi
+
+exec "$SCRIPTS/task-board" "$@"

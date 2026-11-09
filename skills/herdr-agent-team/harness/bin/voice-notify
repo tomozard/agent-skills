@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: voice-notify {init|claim|summary|idle|permission|tool|test} [message|tool-name]
+
+Play a macOS sound and speak a short Thai status message. The command is
+intended for Pi extensions and Claude Code hooks, but can also be run manually.
+
+Environment:
+  HERDR_VOICE_NOTIFY=0       Disable all notifications (default).
+  HERDR_VOICE_SOUND=0        Disable sound effects but keep speech.
+  HERDR_VOICE_SPEECH=0       Disable speech but keep sound effects.
+  HERDR_VOICE_TTS_SCRIPT=... Use an executable gTTS script (preferred).
+  HERDR_VOICE_OWNER_FILE=... Session-scoped active controller state.
+EOF
+}
+
+ACTION="${1:-}"
+shift || true
+
+is_enabled() {
+  case "${1:-0}" in
+    0|false|no|off) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+if [ "$(uname -s)" != "Darwin" ] || ! is_enabled "${HERDR_VOICE_NOTIFY:-0}"; then
+  exit 0
+fi
+
+CONFIG_DIR="${HERDR_VOICE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr}"
+LOG_FILE="${HERDR_VOICE_LOG_FILE:-$CONFIG_DIR/voice-notify.log}"
+OWNER_FILE="${HERDR_VOICE_OWNER_FILE:-$CONFIG_DIR/voice-owner}"
+IDLE_SOUND="${HERDR_VOICE_IDLE_SOUND:-/System/Library/Sounds/Glass.aiff}"
+PERMISSION_SOUND="${HERDR_VOICE_PERMISSION_SOUND:-/System/Library/Sounds/Ping.aiff}"
+VOICE_ROLE="${HERDR_AGENT_ROLE:-}"
+# App-runtime panes carry HC_TERMINAL_ID; only the TUI runtime sets HERDR_PANE_ID.
+# Without this fallback every app pane has an empty identity and every summary is
+# suppressed as "not-owner", which is exactly how voice looked switched on but
+# silent.
+VOICE_PANE="${HERDR_PANE_ID:-${HC_TERMINAL_ID:-}}"
+PANE_TOKEN="$(printf '%s' "${VOICE_PANE:-manual}" | tr -c 'A-Za-z0-9_.-' '_')"
+PENDING_FILE="$OWNER_FILE.$PANE_TOKEN.pending"
+
+mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+
+log() {
+  local line
+  line="$(printf '%s %s' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*")"
+  printf '%s\n' "$line" >> "$LOG_FILE" 2>/dev/null || return 0
+  # This log grows forever otherwise: one long session reached 1.2 MB, which is
+  # past the size other tools will scan. Rotate once past 256 KB.
+  if [ "$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)" -gt 262144 ]; then
+    tail -n 500 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null \
+      && mv "$LOG_FILE.tmp" "$LOG_FILE" 2>/dev/null || true
+  fi
+}
+
+is_voice_role() {
+  case "$VOICE_ROLE" in
+    orchestrator|pm) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+voice_identity() {
+  printf '%s:%s' "$VOICE_ROLE" "$VOICE_PANE"
+}
+
+write_state() {
+  local file="$1" value="$2" state_dir temporary
+  state_dir="$(dirname "$file")"
+  mkdir -p "$state_dir" 2>/dev/null || return 1
+  temporary="$file.$$"
+  umask 077
+  printf '%s\n' "$value" > "$temporary" || return 1
+  mv -f "$temporary" "$file"
+}
+
+mark_pending() {
+  write_state "$PENDING_FILE" "$(voice_identity)"
+}
+
+owner_matches() {
+  local owner
+  if [ -z "$VOICE_ROLE" ] && [ -z "$VOICE_PANE" ]; then
+    return 0
+  fi
+  is_voice_role && [ -n "$VOICE_PANE" ] || return 1
+  if [ ! -f "$OWNER_FILE" ]; then
+    [ "$VOICE_ROLE" = "orchestrator" ]
+    return
+  fi
+  owner="$(cat "$OWNER_FILE" 2>/dev/null || true)"
+  [ "$owner" = "$(voice_identity)" ]
+}
+
+pending_allows() {
+  [ "$VOICE_ROLE" != "pm" ] || [ -f "$PENDING_FILE" ]
+}
+
+is_inter_agent_prompt() {
+  local first_line
+  first_line="${1%%$'\n'*}"
+  first_line="${first_line#"${first_line%%[![:space:]]*}"}"
+  case "$first_line" in
+    \[*\][[:space:]]from:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Results the owning PM must relay to the Human. They never move ownership.
+is_human_result_prompt() {
+  local first_line
+  first_line="${1%%$'\n'*}"
+  first_line="${first_line#"${first_line%%[![:space:]]*}"}"
+  case "$first_line" in
+    \[DONE\][[:space:]]from:*|\[STUCK\][[:space:]]from:*|\[AWAITING_HUMAN_COMMIT\][[:space:]]from:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+run_detached() {
+  nohup "$@" >> "$LOG_FILE" 2>&1 < /dev/null &
+}
+
+play_sound() {
+  local sound="$1"
+  is_enabled "${HERDR_VOICE_SOUND:-1}" || return 0
+  command -v afplay >/dev/null 2>&1 || return 0
+  [ -f "$sound" ] || return 0
+  run_detached afplay "$sound"
+}
+
+tts_script="${HERDR_VOICE_TTS_SCRIPT:-}"
+if [ -z "$tts_script" ]; then
+  for candidate in \
+    "${HERDR_VOICE_CONFIG_DIR:-$HOME/.config/herdr}/tts-thai.sh" \
+    "$HOME/.codex/tts-thai.sh" \
+    "$HOME/.config/opencode/tts-thai.sh"; do
+    if [ -x "$candidate" ]; then
+      tts_script="$candidate"
+      break
+    fi
+  done
+fi
+
+speak() {
+  local message="$1"
+  is_enabled "${HERDR_VOICE_SPEECH:-1}" || return 0
+  [ -n "$message" ] || return 0
+
+  if [ -n "$tts_script" ] && [ -x "$tts_script" ]; then
+    log "tts:$(basename "$tts_script") $tts_script"
+    run_detached "$tts_script" "$message"
+    return 0
+  fi
+
+  # No engine, no voice: the adapter is the only speaker, and the sound cue
+  # already told the Human something happened. Substituting another voice here
+  # is exactly what the team decided against.
+  log "tts:none $message"
+  return 0
+}
+
+tool_name_from_hook() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    payload = {}
+
+if isinstance(payload, dict):
+    value = payload.get("tool_name") or payload.get("toolName") or ""
+    if isinstance(value, str):
+        print(value.replace("\n", " ").strip())
+' 2>/dev/null || true
+}
+
+summary_from_hook() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    payload = {}
+
+if isinstance(payload, dict):
+    value = payload.get("last_assistant_message") or ""
+    if isinstance(value, str):
+        print(value.replace("\x00", " ").strip())
+' 2>/dev/null || true
+}
+
+prompt_from_hook() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    payload = {}
+
+if isinstance(payload, dict):
+    value = payload.get("prompt") or payload.get("user_prompt") or ""
+    if isinstance(value, str):
+        print(value.replace("\x00", " ").strip())
+' 2>/dev/null || true
+}
+
+compact_message() {
+  local value="$1"
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$value"
+    return 0
+  fi
+  python3 - "$value" <<'PY'
+import re
+import sys
+
+text = sys.argv[1]
+text = re.sub(r"```[\s\S]*?```", " ", text)
+text = re.sub(r"<think>[\s\S]*?</think>", " ", text, flags=re.IGNORECASE)
+text = re.sub(r"https?://\S+", " ", text)
+text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]*", "", text)
+text = re.sub(r"(?m)^[ \t]*[-*+][ \t]+", "", text)
+text = re.sub(r"(?m)^[ \t]*>[ \t]?", "", text)
+text = re.sub(r"[*_~`]+", "", text)
+text = re.sub(r"^\s*สวัสดี(?:ครับ|ค่ะ|คะ)?[^\n.!?。！？]*(?:[.!?。！？]+|\n|$)", "", text, count=1)
+registry_match = re.search(
+    r"Workspace Registry[\s\S]*?มีทั้งหมด\s+([0-9๐-๙]+)\s+โปรเจกต์[\s\S]*(?:โปรด\s*)?เลือกโปรเจกต์",
+    text,
+    flags=re.IGNORECASE,
+)
+if registry_match:
+    thai_digits = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
+    count = registry_match.group(1).translate(thai_digits)
+    print(
+        f"ตรวจสอบ Workspace Registry เรียบร้อยแล้วค่ะ พบ {count} โปรเจกต์ "
+        "กรุณาเลือกโปรเจกต์ที่ต้องการเปิดค่ะ"
+    )
+    raise SystemExit
+lines = [
+    re.sub(r"\s+", " ", line).strip()
+    for line in text.splitlines()
+]
+lines = [line for line in lines if line and not re.fullmatch(r"[-*_]{3,}", line)]
+candidate = lines[0] if lines else ""
+def first_sentence(value):
+    match = re.match(r".*?(?:[.!?。！？]+|$)", value)
+    return (match.group(0) if match else value).strip()
+
+summary = first_sentence(candidate)
+action = None
+action_start = re.compile(
+    r"^(?:กรุณา|โปรด|ขอให้|รบกวน|ช่วย|เลือก|ยืนยัน|ระบุ|ตอบกลับ|ส่ง|อนุมัติ|"
+    r"Human\s*(?:ต้อง|ควร)|คุณ\s*(?:ต้อง|ควร))",
+    flags=re.IGNORECASE,
+)
+for line in lines[1:]:
+    if not action_start.search(line):
+        continue
+    possible = first_sentence(line)
+    if possible and len(possible) <= 160:
+        action = possible
+        break
+if action and not re.search(r"(?:กรุณา|โปรด|ขอให้|รบกวน|ช่วย)", summary):
+    combined = f"{summary} {action}"
+    if len(combined) <= 160:
+        summary = combined
+    elif len(action) <= 160:
+        summary = action
+if not summary or len(summary) > 160:
+    summary = "สรุปผลการทำงานอยู่ในแชตค่ะ"
+print(summary)
+PY
+}
+
+case "$ACTION" in
+  release)
+    # Nothing clears the owner file when a pane is killed, so a restarted team
+    # would inherit a dead owner and stay silent. The launcher clears it before a
+    # session starts and the shutdown helper clears it when the session ends.
+    rm -f "$OWNER_FILE" 2>/dev/null || true
+    rm -f "$OWNER_FILE".*.pending 2>/dev/null || true
+    rm -f "$PENDING_FILE" 2>/dev/null || true
+    log "owner:release ${VOICE_ROLE:-manual}:${VOICE_PANE:-manual}"
+    exit 0
+    ;;
+  init)
+    if [ "$VOICE_ROLE" = "orchestrator" ] && [ -n "$VOICE_PANE" ]; then
+      write_state "$OWNER_FILE" "$(voice_identity)" || true
+      mark_pending || true
+      log "owner:init $(voice_identity)"
+    fi
+    exit 0
+    ;;
+  claim)
+    message="${1:-}"
+    if [ -z "$message" ] && [ ! -t 0 ]; then
+      message="$(prompt_from_hook)"
+    fi
+    if is_voice_role && [ -n "$VOICE_PANE" ] \
+      && [ -n "$message" ] && ! is_inter_agent_prompt "$message"; then
+      write_state "$OWNER_FILE" "$(voice_identity)" || true
+      mark_pending || true
+      log "owner:claim $(voice_identity)"
+    elif [ "$VOICE_ROLE" = "pm" ] && [ -n "$VOICE_PANE" ] \
+      && is_human_result_prompt "$message" && owner_matches; then
+      mark_pending || true
+      log "owner:result $(voice_identity)"
+    fi
+    exit 0
+    ;;
+  summary)
+    sound="$IDLE_SOUND"
+    message="${1:-}"
+    if [ -z "$message" ] && [ ! -t 0 ]; then
+      message="$(summary_from_hook)"
+    fi
+    [ -n "$message" ] || message="เสร็จเรียบร้อย"
+    message="$(compact_message "$message")"
+    ;;
+  idle|test)
+    sound="$IDLE_SOUND"
+    message="เสร็จเรียบร้อย"
+    ;;
+  permission)
+    sound="$PERMISSION_SOUND"
+    tool_name="$(tool_name_from_hook)"
+    message="มีคำขออนุญาต"
+    [ -n "$tool_name" ] && message="$message $tool_name"
+    ;;
+  tool)
+    sound="$PERMISSION_SOUND"
+    tool_name="${1:-tool}"
+    message="กำลังเรียกใช้ $tool_name"
+    ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+
+if ! owner_matches; then
+  log "$ACTION suppressed:not-owner ${VOICE_ROLE:-manual}:${VOICE_PANE:-manual}"
+  exit 0
+fi
+if ! pending_allows; then
+  log "$ACTION suppressed:no-human-turn $VOICE_ROLE:$VOICE_PANE"
+  exit 0
+fi
+
+log "$ACTION: $message"
+play_sound "$sound"
+speak "$message"
+if [ "$ACTION" = "summary" ] && [ "$VOICE_ROLE" = "pm" ]; then
+  rm -f "$PENDING_FILE"
+fi

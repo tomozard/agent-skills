@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+WORKSPACES=()
+WORKSPACE_COUNT=0
+
+usage() {
+  cat <<'EOF'
+Usage: agent-team-shutdown [--workspace ID ...]
+
+Close project workspaces owned by the current Orchestrator, then hand shutdown
+to the detached external finalizer. The finalizer queues /quit in the current
+Orchestrator pane before stopping the Herdr server for the default session.
+Pass only project workspace IDs created or reused by this Orchestrator.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --workspace)
+      [ -n "${2:-}" ] || { usage >&2; exit 2; }
+      WORKSPACES+=("$2")
+      WORKSPACE_COUNT=$((WORKSPACE_COUNT + 1))
+      shift 2
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "agent-team-shutdown: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ "${HERDR_ENV:-}" != "1" ]; then
+  echo "agent-team-shutdown: HERDR_ENV=1 is required" >&2
+  exit 1
+fi
+if [ "${HERDR_AGENT_ROLE:-}" != "orchestrator" ]; then
+  echo "agent-team-shutdown: only the Orchestrator may shut down the team" >&2
+  exit 1
+fi
+if [ -z "${HERDR_PANE_ID:-}" ]; then
+  echo "agent-team-shutdown: HERDR_PANE_ID is required" >&2
+  exit 1
+fi
+if [ -z "${HERDR_SHUTDOWN_MARKER:-}" ]; then
+  echo "agent-team-shutdown: shutdown marker is missing; restart with the current herdr-team" >&2
+  exit 1
+fi
+case "$HERDR_SHUTDOWN_MARKER" in
+  /*) ;;
+  *) echo "agent-team-shutdown: shutdown marker must be an absolute path" >&2; exit 1 ;;
+esac
+command -v herdr >/dev/null 2>&1 || {
+  echo "agent-team-shutdown: herdr not found" >&2
+  exit 1
+}
+
+if [ "$WORKSPACE_COUNT" -gt 0 ]; then
+  for workspace in "${WORKSPACES[@]}"; do
+    if [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ "$workspace" = "$HERDR_WORKSPACE_ID" ]; then
+      echo "agent-team-shutdown: refusing to close the global Orchestrator workspace: $workspace" >&2
+      exit 1
+    fi
+    herdr workspace get "$workspace" >/dev/null
+  done
+fi
+
+if [ "$WORKSPACE_COUNT" -gt 0 ]; then
+  for workspace in "${WORKSPACES[@]}"; do
+    herdr workspace close "$workspace"
+    printf 'agent-team-shutdown: closed project workspace %s\n' "$workspace"
+  done
+fi
+
+# Mark the launcher before handing shutdown to the detached finalizer. The
+# finalizer queues /quit outside this pane, so this helper cannot be killed
+# before the handoff is complete.
+printf '%s\n' "$HERDR_PANE_ID" > "$HERDR_SHUTDOWN_MARKER"
+if [ -z "${HERDR_SHUTDOWN_SIGNAL:-}" ] || [ ! -p "$HERDR_SHUTDOWN_SIGNAL" ]; then
+  echo "agent-team-shutdown: detached shutdown finalizer is unavailable" >&2
+  rm -f "$HERDR_SHUTDOWN_MARKER"
+  exit 1
+fi
+if ! python3 - "$HERDR_SHUTDOWN_SIGNAL" "$HERDR_PANE_ID" <<'PY'
+import os
+import sys
+
+signal_path, pane_id = sys.argv[1:]
+try:
+    descriptor = os.open(signal_path, os.O_WRONLY | os.O_NONBLOCK)
+    os.write(descriptor, f"{pane_id}\n".encode())
+    os.close(descriptor)
+except OSError as error:
+    print(
+        f"agent-team-shutdown: unable to signal detached finalizer: {error}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+then
+  rm -f "$HERDR_SHUTDOWN_MARKER"
+  exit 1
+fi
+echo "agent-team-shutdown: handed shutdown to detached external finalizer"

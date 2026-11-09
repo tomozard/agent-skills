@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Deterministic workflow-shape resolver — thin shim.
+#
+# The resolver itself lives in the agent-skills skill, which is the single
+# source for this tooling (installed with
+# `npx skills add tomozard/agent-skills/skills/herdr-agent-team`). This shim
+# only pins this harness's .agents/team.json and explains a missing install,
+# so the two copies cannot drift apart again.
+#
+# Usage and exit codes are the skill's: `workflow-shape --help`.
+
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SELF/.." && pwd)"
+SCRIPTS="${HERDR_AGENT_TEAM_SCRIPTS:-$HOME/.agents/skills/herdr-agent-team/scripts}"
+
+if [ ! -x "$SCRIPTS/workflow-shape" ]; then
+  echo "workflow-shape: the agent-skills resolver is not installed" >&2
+  echo "  expected: $SCRIPTS/workflow-shape" >&2
+  echo "  install : npx skills add tomozard/agent-skills/skills/herdr-agent-team" >&2
+  exit 3
+fi
+
+export HERDR_TEAM_FILE="${HERDR_TEAM_FILE:-$REPO/.agents/team.json}"
+exec "$SCRIPTS/workflow-shape" "$@"

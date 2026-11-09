@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: validate-okf [ROOT]
+
+Validate the minimal OKF contract for Markdown files below ROOT (default: .):
+concept documents must have YAML frontmatter with a non-empty type field;
+reserved index.md/log.md files must not use concept frontmatter.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ROOT="." ;;
+  *) ROOT="$1" ;;
+esac
+
+ROOT="$(python3 -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$ROOT")"
+[ -d "$ROOT" ] || { echo "validate-okf: root does not exist: $ROOT" >&2; exit 1; }
+
+python3 - "$ROOT" <<'PY'
+from datetime import date
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+errors = []
+checked = 0
+
+for path in sorted(root.rglob("*.md")):
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if path.name == "index.md":
+        if lines and lines[0].strip() == "---":
+            errors.append(f"{path}: reserved index.md must not have frontmatter")
+        continue
+    if path.name == "log.md":
+        if lines and lines[0].strip() == "---":
+            errors.append(f"{path}: reserved log.md must not have frontmatter")
+        date_headings = [line[3:].strip() for line in lines if line.startswith("## ")]
+        parsed_dates = []
+        for heading in date_headings:
+            try:
+                parsed_dates.append(date.fromisoformat(heading))
+            except ValueError:
+                errors.append(f"{path}: log date headings must use YYYY-MM-DD")
+        if parsed_dates != sorted(parsed_dates, reverse=True):
+            errors.append(f"{path}: log date headings must be newest first")
+        if not date_headings and lines:
+            errors.append(f"{path}: log must contain at least one ## YYYY-MM-DD heading")
+        continue
+    checked += 1
+    if not lines or lines[0].strip() != "---":
+        errors.append(f"{path}: missing YAML frontmatter")
+        continue
+    try:
+        closing = lines.index("---", 1)
+    except ValueError:
+        errors.append(f"{path}: unterminated YAML frontmatter")
+        continue
+    type_values = []
+    for line in lines[1:closing]:
+        if line.startswith("type:"):
+            type_values.append(line.split(":", 1)[1].strip())
+    if not type_values or not type_values[0]:
+        errors.append(f"{path}: frontmatter type is missing or empty")
+
+if errors:
+    print("validate-okf: failed", file=sys.stderr)
+    print("\n".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+print(f"validate-okf: ok ({checked} concept file(s), reserved index.md/log.md exempt)")
+PY

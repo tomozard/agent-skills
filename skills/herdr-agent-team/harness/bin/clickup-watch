@@ -1,0 +1,1786 @@
+#!/usr/bin/env python3
+"""clickup-watch — ClickUp intake for the Herdr desktop-app agent team.
+
+Polls one ClickUp list for tasks in the trigger status, works out which
+registered project the task belongs to, and pushes a task brief to that
+project's PM pane (or asks the Orchestrator to open the PM). It uses the
+already-authenticated ClickUp MCP the Pi/Claude runtimes use, over plain
+HTTP — no personal API token, no LLM turn per poll.
+
+Usage:
+  clickup-watch once      one poll, then exit (--dry-run, --fixture FILE)
+  clickup-watch loop      poll forever every --interval seconds (default 600)
+  clickup-watch start     start the kept watcher terminal in Herdr
+  clickup-watch stop      stop the watcher terminal
+  clickup-watch status    watcher terminal, last poll, last dispatch
+
+Intake contract (Human-approved):
+  - trigger status is `to do`
+  - a dispatched task becomes `in progress` and gets a ClickUp comment, so the
+    next poll does not pick it up again
+  - a task whose project cannot be resolved with confidence goes back to the
+    Human as `discuss` with a comment naming what is missing
+  - the brief never grants scope, commit, push, or PR authority: PM must put a
+    plan to the Human in its own pane before any implementation starts
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+HOME = Path.home()
+REPO = Path(__file__).resolve().parent.parent
+CLI_PATH = str(Path(__file__).resolve())
+
+# Built-in defaults. Everything here can be set in the config file, and a
+# matching environment variable still wins for one-off runs.
+DEFAULTS: Dict[str, Any] = {
+    "list_id": "",
+    "workspace_id": "",
+    "status": "to do",
+    "in_progress_status": "in progress",
+    "discuss_status": "discuss",
+    "ready_status": "ready",
+    "require_tag": "agent-team",
+    "require_assignee": "me",
+    "claim_assignee": "me",
+    "interval": 1800,
+    "max_tasks": 1,
+    "stale_hours": 8,
+    "orch_retry_seconds": 1800,
+    "project": "",
+    "registry": str(HOME / "Workspaces/.agents/workspace-registry.yaml"),
+    "state_dir": str(HOME / ".local/state/herdr-app-team/clickup-watch"),
+    "terminal_name": "clickup-watch",
+    "team_space": "Herdr Team",
+    "mcp_url": "https://mcp.clickup.com/mcp",
+    "herdr_core": str(HOME / ".local/bin/herdr-core"),
+}
+ENV_FOR = {
+    "list_id": "CLICKUP_WATCH_LIST_ID",
+    "workspace_id": "CLICKUP_WATCH_WORKSPACE_ID",
+    "status": "CLICKUP_WATCH_STATUS",
+    "in_progress_status": "CLICKUP_WATCH_IN_PROGRESS_STATUS",
+    "discuss_status": "CLICKUP_WATCH_DISCUSS_STATUS",
+    "ready_status": "CLICKUP_WATCH_READY_STATUS",
+    "require_tag": "CLICKUP_WATCH_TAG",
+    "require_assignee": "CLICKUP_WATCH_REQUIRE_ASSIGNEE",
+    "claim_assignee": "CLICKUP_WATCH_CLAIM_ASSIGNEE",
+    "interval": "CLICKUP_WATCH_INTERVAL",
+    "max_tasks": "CLICKUP_WATCH_MAX_TASKS",
+    "stale_hours": "CLICKUP_WATCH_STALE_HOURS",
+    "orch_retry_seconds": "CLICKUP_WATCH_ORCH_RETRY",
+    "project": "CLICKUP_WATCH_PROJECT",
+    "registry": "CLICKUP_WATCH_REGISTRY",
+    "state_dir": "CLICKUP_WATCH_STATE_DIR",
+    "terminal_name": "CLICKUP_WATCH_TERMINAL_NAME",
+    "team_space": "HERDR_TEAM_SPACE",
+    "mcp_url": "CLICKUP_MCP_URL",
+    "herdr_core": "HC_BIN",
+}
+NUM_KEYS = {"interval", "max_tasks", "orch_retry_seconds", "stale_hours"}
+
+
+def config_path() -> Path:
+    override = os.environ.get("CLICKUP_WATCH_CONFIG", "")
+    if override:
+        return Path(override).expanduser()
+    return Path(os.environ.get("XDG_CONFIG_HOME") or (HOME / ".config")) / "herdr-team" / "clickup-watch.yaml"
+
+
+CONFIG_FILE = config_path()
+
+# Resolved values (config file, then env, then defaults) — filled by apply_config().
+LIST_ID = str(DEFAULTS["list_id"])
+WORKSPACE_ID = str(DEFAULTS["workspace_id"])
+TRIGGER_STATUS = str(DEFAULTS["status"])
+IN_PROGRESS_STATUS = str(DEFAULTS["in_progress_status"])
+DISCUSS_STATUS = str(DEFAULTS["discuss_status"])
+READY_STATUS = str(DEFAULTS["ready_status"])
+REQUIRE_TAG = str(DEFAULTS["require_tag"])
+REQUIRE_ASSIGNEE = str(DEFAULTS["require_assignee"])
+CLAIM_ASSIGNEE = str(DEFAULTS["claim_assignee"])
+INTERVAL = int(DEFAULTS["interval"])
+MAX_TASKS = int(DEFAULTS["max_tasks"])
+STALE_HOURS = float(DEFAULTS["stale_hours"])
+ORCH_RETRY = int(DEFAULTS["orch_retry_seconds"])
+PROJECT_OVERRIDE = ""
+REGISTRY = Path(str(DEFAULTS["registry"])).expanduser()
+STATE_DIR = Path(str(DEFAULTS["state_dir"])).expanduser()
+TERMINAL_NAME = str(DEFAULTS["terminal_name"])
+MCP_URL = str(DEFAULTS["mcp_url"])
+HC = str(DEFAULTS["herdr_core"])
+TEAM_SPACE = str(DEFAULTS["team_space"])
+
+
+def read_config(path: Optional[Path] = None) -> Dict[str, Any]:
+    """Config file values; an absent or unreadable file is not an error."""
+    target = path or CONFIG_FILE
+    if not target.is_file():
+        return {}
+    try:
+        import yaml  # noqa: PLC0415
+    except ImportError:
+        die("PyYAML is required to read the config file (pip install pyyaml)")
+    try:
+        data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError) as error:
+        die(f"cannot read config {target}: {error}")
+    if not isinstance(data, dict):
+        die(f"config {target} must be a mapping of keys to values")
+    return data
+
+
+def apply_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resolve config file → environment → defaults into the module globals."""
+    global LIST_ID, WORKSPACE_ID, TRIGGER_STATUS, IN_PROGRESS_STATUS, DISCUSS_STATUS
+    global REQUIRE_TAG, CLAIM_ASSIGNEE, READY_STATUS
+    global REQUIRE_ASSIGNEE
+    global INTERVAL, MAX_TASKS, STALE_HOURS, ORCH_RETRY, PROJECT_OVERRIDE, REGISTRY, STATE_DIR
+    global TERMINAL_NAME, MCP_URL, HC, TEAM_SPACE
+
+    file_values = read_config() if config is None else config
+    resolved: Dict[str, Any] = {}
+    for key, default in DEFAULTS.items():
+        # One-off environment override wins, then the config file, then the default.
+        value: Any = os.environ.get(ENV_FOR.get(key, ""), "")
+        if value in (None, ""):
+            value = file_values.get(key)
+        if value in (None, ""):
+            value = default
+        if key in NUM_KEYS:
+            try:
+                value = float(value) if key == "stale_hours" else int(value)
+            except (TypeError, ValueError):
+                die(f"config {key} must be a number (got {value!r}) in {CONFIG_FILE}")
+        else:
+            value = str(value).strip()
+        resolved[key] = value
+
+    LIST_ID = resolved["list_id"]
+    WORKSPACE_ID = resolved["workspace_id"]
+    TRIGGER_STATUS = resolved["status"]
+    IN_PROGRESS_STATUS = resolved["in_progress_status"]
+    DISCUSS_STATUS = resolved["discuss_status"]
+    READY_STATUS = resolved["ready_status"]
+    REQUIRE_TAG = resolved["require_tag"]
+    REQUIRE_ASSIGNEE = resolved["require_assignee"]
+    CLAIM_ASSIGNEE = resolved["claim_assignee"]
+    INTERVAL = int(resolved["interval"])
+    MAX_TASKS = int(resolved["max_tasks"])
+    STALE_HOURS = float(resolved["stale_hours"])
+    ORCH_RETRY = int(resolved["orch_retry_seconds"])
+    PROJECT_OVERRIDE = resolved["project"]
+    REGISTRY = Path(resolved["registry"]).expanduser()
+    STATE_DIR = Path(resolved["state_dir"]).expanduser()
+    TERMINAL_NAME = resolved["terminal_name"]
+    MCP_URL = resolved["mcp_url"]
+    HC = resolved["herdr_core"] or shutil.which("herdr-core") or str(HOME / ".local/bin/herdr-core")
+    TEAM_SPACE = resolved["team_space"]
+    return resolved
+
+GENERIC_PHRASES = {
+    "api", "cms", "web", "app", "apps", "admin", "docs", "doc", "playground",
+    "main", "list", "service", "front", "back", "ui", "server", "site",
+    "mobile", "data", "test", "demo", "proto", "poc",
+}
+GENERIC_WORDS = GENERIC_PHRASES | {
+    "frontend", "backend", "workspace", "project", "application", "service",
+    "platform", "dashboard", "website", "content",
+}
+
+
+# ---------------------------------------------------------------------------
+# output + state
+# ---------------------------------------------------------------------------
+def now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_ts(value: Any) -> float:
+    """Our own ISO-8601 'Z' timestamps → epoch seconds (0 when unparseable)."""
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def age_hours(value: Any) -> Optional[float]:
+    stamp = parse_ts(value)
+    if not stamp:
+        return None
+    return max(0.0, (time.time() - stamp) / 3600.0)
+
+
+def say(message: str) -> None:
+    try:
+        print(message, flush=True)
+    except BrokenPipeError:  # e.g. piped into `head`
+        raise SystemExit(0)
+
+
+def log(message: str, **fields: Any) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    entry = {"at": now(), "message": message, **fields}
+    line = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+    try:
+        with open(STATE_DIR / "watch.log", "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+    detail = " ".join(f"{key}={value}" for key, value in fields.items() if value not in (None, ""))
+    say(f"[{entry['at']}] {message}" + (f" — {detail}" if detail else ""))
+
+
+def die(message: str, code: int = 1) -> "NoReturn":  # type: ignore[valid-type]
+    say(f"clickup-watch: {message}")
+    raise SystemExit(code)
+
+
+def state_path() -> Path:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    return STATE_DIR / "state.json"
+
+
+def load_state() -> Dict[str, Any]:
+    path = state_path()
+    if not path.exists():
+        return {"version": 1, "list_id": LIST_ID, "tasks": {}, "last_poll": None, "last_dispatch": None}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"version": 1, "list_id": LIST_ID, "tasks": {}, "last_poll": None, "last_dispatch": None}
+    data.setdefault("tasks", {})
+    return data
+
+
+def save_state(state: Dict[str, Any]) -> None:
+    path = state_path()
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+class Lock:
+    """One poll at a time, across the loop, cron, and manual runs."""
+
+    def __init__(self) -> None:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self.handle = open(STATE_DIR / "watch.lock", "w")
+
+    def __enter__(self) -> "Lock":
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            die("another clickup-watch poll is already running", 3)
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+
+
+# ---------------------------------------------------------------------------
+# ClickUp MCP over streamable HTTP (reuses the runtime's OAuth login)
+# ---------------------------------------------------------------------------
+def token_files() -> Iterable[Path]:
+    override = os.environ.get("CLICKUP_MCP_TOKEN_FILE", "")
+    if override:
+        yield Path(override).expanduser()
+        return
+    root = Path(os.environ.get("CLICKUP_MCP_AUTH_DIR", str(HOME / ".mcp-auth"))).expanduser()
+    if not root.is_dir():
+        return
+    for path in sorted(root.glob("*/*_tokens.json")):
+        yield path
+
+
+def load_token() -> str:
+    inline = os.environ.get("CLICKUP_MCP_TOKEN", "").strip()
+    if inline:
+        return inline
+    best: Optional[Tuple[int, str]] = None
+    seen_any = False
+    for path in token_files():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        token = (data.get("access_token") or "").strip()
+        if not token:
+            continue
+        seen_any = True
+        if "clickup" not in str(data.get("issuer", "")).lower():
+            # mcp-remote keeps one store per package version; only the ClickUp
+            # one carries that issuer. Older stores have no issuer at all.
+            if data.get("issuer"):
+                continue
+        expires_at = data.get("expires_at") or 0
+        try:
+            expires_at = int(expires_at)
+        except (TypeError, ValueError):
+            expires_at = 0
+        if best is None or expires_at > best[0]:
+            best = (expires_at, token)
+    if best is None:
+        hint = "no ClickUp MCP login found — run: pi mcp login clickup" if not seen_any else \
+               "no ClickUp MCP token found — run: pi mcp login clickup"
+        die(hint)
+    return best[1]
+
+
+class Mcp:
+    def __init__(self) -> None:
+        self.token = load_token()
+        self.session: Optional[str] = None
+        self.next_id = 1
+        self.headers = {
+            "Authorization": "Bearer " + self.token,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        self._rpc("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "herdr-clickup-watch", "version": "1"},
+        })
+        self._notify("notifications/initialized", {})
+
+    # -- transport -------------------------------------------------------
+    def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        data = json.dumps(payload).encode("utf-8")
+        headers = dict(self.headers)
+        if self.session:
+            headers["Mcp-Session-Id"] = self.session
+        request = urllib.request.Request(MCP_URL, data=data, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                session = response.headers.get("Mcp-Session-Id")
+                if session:
+                    self.session = session
+                content_type = response.headers.get("content-type", "")
+                body = response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as error:
+            detail = error.read()[:300].decode("utf-8", "replace")
+            if error.code in (401, 403):
+                die(f"ClickUp MCP rejected the token ({error.code}); run: pi mcp login clickup")
+            die(f"ClickUp MCP HTTP {error.code}: {detail}")
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            die(f"ClickUp MCP unreachable: {error}")
+        if not body.strip():
+            return {}
+        if "text/event-stream" in content_type:
+            for line in body.splitlines():
+                if line.startswith("data:"):
+                    chunk = line[5:].strip()
+                    if chunk:
+                        return json.loads(chunk)
+            die("ClickUp MCP returned an empty event stream")
+        return json.loads(body)
+
+    def _rpc(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        request_id = self.next_id
+        self.next_id += 1
+        response = self._post({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        if "error" in response:
+            die(f"ClickUp MCP {method} failed: {json.dumps(response['error'])[:300]}")
+        return response.get("result") or {}
+
+    def _notify(self, method: str, params: Dict[str, Any]) -> None:
+        try:
+            self._post({"jsonrpc": "2.0", "method": method, "params": params})
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+
+    # -- tools -----------------------------------------------------------
+    def call(self, name: str, arguments: Dict[str, Any]) -> Any:
+        result = self._rpc("tools/call", {"name": name, "arguments": arguments})
+        if result.get("isError"):
+            die(f"ClickUp {name} failed: {json.dumps(result)[:300]}")
+        structured = result.get("structuredContent")
+        if structured is not None:
+            return structured
+        for item in result.get("content") or []:
+            if item.get("type") == "text":
+                try:
+                    return json.loads(item.get("text") or "{}")
+                except ValueError:
+                    return {"text": item.get("text")}
+        return {}
+
+    def list_tasks(self, list_id: str, statuses: List[str], page: int = 0) -> Dict[str, Any]:
+        arguments: Dict[str, Any] = {
+            "list_ids": [list_id],
+            "statuses": statuses,
+            "include_closed": False,
+            "subtasks": True,
+            "order_by": "updated",
+            "reverse": False,
+            "page": page,
+            "fields": ["status", "priority", "tags", "assignees", "date_updated"],
+            "workspace_id": WORKSPACE_ID,
+        }
+        if REQUIRE_TAG:
+            arguments["tags"] = [REQUIRE_TAG]
+        if REQUIRE_ASSIGNEE:
+            # filter_tasks resolves names/emails/"me" itself.
+            arguments["assignees"] = [REQUIRE_ASSIGNEE]
+        return self.call("clickup_filter_tasks", arguments)
+
+    def get_task(self, task_id: str) -> Dict[str, Any]:
+        return self.call("clickup_get_task", {
+            "task_id": task_id,
+            "include": ["description"],
+            "workspace_id": WORKSPACE_ID,
+        })
+
+    def set_status(self, task_id: str, status: str) -> None:
+        self.call("clickup_update_task", {
+            "task_id": task_id, "status": status, "workspace_id": WORKSPACE_ID,
+        })
+
+    def claim(self, task_id: str, existing: List[Any]) -> str:
+        """Assign the task to the agent's ClickUp user so humans see it is taken.
+
+        An existing assignee list is never replaced: if a person already holds
+        the task, the claim is skipped and reported instead of overwriting it.
+        """
+        if not CLAIM_ASSIGNEE:
+            return "off"
+        owners = [str(a.get("id") if isinstance(a, dict) else a) for a in (existing or [])]
+        owners = [owner for owner in owners if owner]
+        owner_id = self.resolve_assignee(CLAIM_ASSIGNEE)
+        if owner_id and owner_id in owners:
+            return "already"
+        if owners:
+            # Never rewrite a list a person already holds.
+            return "skipped-existing-assignee"
+        if not owner_id:
+            return "unresolved-assignee"
+        self.call("clickup_update_task", {
+            "task_id": task_id, "assignees": [owner_id], "workspace_id": WORKSPACE_ID,
+        })
+        return "assigned"
+
+    def resolve_assignee(self, who: str) -> str:
+        """'me' / name / email → numeric ClickUp user id (update_task needs ids)."""
+        if who.isdigit():
+            return who
+        if getattr(self, "_assignee_cache", None) is None:
+            self._assignee_cache = {}
+        if who in self._assignee_cache:
+            return self._assignee_cache[who]
+        payload = self.call("clickup_resolve_assignees", {
+            "assignees": [who], "workspace_id": WORKSPACE_ID,
+        })
+        resolved = ""
+        ids = payload.get("userIds") if isinstance(payload, dict) else None
+        if ids:
+            resolved = str(ids[0])
+        for item in (payload.get("resolved") or payload.get("assignees") or []) if isinstance(payload, dict) else []:
+            if resolved:
+                break
+            if isinstance(item, dict) and item.get("id"):
+                resolved = str(item["id"])
+                break
+        self._assignee_cache[who] = resolved
+        return resolved
+
+    def comment(self, task_id: str, text: str) -> None:
+        self.call("clickup_create_task_comment", {
+            "task_id": task_id, "comment_text": text, "workspace_id": WORKSPACE_ID,
+        })
+
+    def human_replies(self, task_id: str, limit: int = 5) -> List[Tuple[str, str, str]]:
+        """Comments written by a person (not this agent), oldest first."""
+        payload = self.call("clickup_get_task_comments", {
+            "task_id": task_id, "workspace_id": WORKSPACE_ID,
+        })
+        me = self.resolve_assignee(CLAIM_ASSIGNEE) if CLAIM_ASSIGNEE else ""
+        replies: List[Tuple[str, str, str]] = []
+        for item in payload.get("comments") or []:
+            user = item.get("user") or {}
+            if me and str(user.get("id") or "") == me:
+                continue
+            text = (item.get("comment_text") or "").strip()
+            if not text:
+                continue
+            replies.append((str(item.get("date") or ""), str(user.get("username") or "human"), text))
+        replies.sort(key=lambda row: (len(row[0]), row[0]))
+        return replies[-limit:]
+
+
+# ---------------------------------------------------------------------------
+# registry + project inference
+# ---------------------------------------------------------------------------
+def load_registry() -> List[Dict[str, Any]]:
+    try:
+        import yaml  # noqa: PLC0415
+    except ImportError:
+        die("PyYAML is required to read the workspace registry (pip install pyyaml)")
+    if not REGISTRY.is_file():
+        die(f"workspace registry not readable: {REGISTRY}")
+    data = yaml.safe_load(REGISTRY.read_text(encoding="utf-8")) or {}
+    projects: List[Dict[str, Any]] = []
+    for slug, entry in (data.get("projects") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        clickup = entry.get("clickup") or {}
+        list_ids = set()
+        if clickup.get("list_id"):
+            list_ids.add(str(clickup["list_id"]))
+        for _, value in (clickup.get("lists") or {}).items():
+            if isinstance(value, dict) and value.get("id"):
+                list_ids.add(str(value["id"]))
+        projects.append({
+            "slug": str(slug),
+            "name": str(entry.get("name") or slug),
+            "path": str(entry.get("path") or ""),
+            "description": str(entry.get("description") or ""),
+            "status": str(entry.get("status") or ""),
+            "auto_intake": bool(clickup.get("auto_intake") or entry.get("auto_intake")),
+            "list_ids": list_ids,
+            "space_ids": {str(clickup[k]) for k in ("space_id",) if clickup.get(k)},
+            "repos": {
+                str(name): {
+                    "path": str(value.get("path") or ""),
+                    "description": str(value.get("description") or ""),
+                }
+                for name, value in (entry.get("repos") or {}).items()
+                if isinstance(value, dict)
+            },
+        })
+    return projects
+
+
+def word_tokens(text: str) -> List[str]:
+    """English words split on any non-alphanumeric, plus whole Thai runs."""
+    return re.findall(r"[a-z0-9]+|[ก-๙]+", text.lower())
+
+
+def thai_blob(text: str) -> str:
+    return "".join(re.findall(r"[ก-๙]+", text.lower()))
+
+
+def contains_sequence(haystack: List[str], needle: List[str]) -> bool:
+    if not needle or len(needle) > len(haystack):
+        return False
+    width = len(needle)
+    return any(haystack[i:i + width] == needle for i in range(len(haystack) - width + 1))
+
+
+def identity_phrases(project: Dict[str, Any]) -> List[List[str]]:
+    """Project and repo identities as token sequences, generic names dropped."""
+    raw = [project["slug"], project["name"], Path(project["path"]).name]
+    for repo_name, repo in project["repos"].items():
+        raw.append(repo_name)
+        if repo["path"]:
+            raw.append(Path(repo["path"]).name)
+    phrases: List[List[str]] = []
+    for item in raw:
+        sequence = word_tokens(item)
+        if not sequence:
+            continue
+        if len(sequence) == 1 and (sequence[0] in GENERIC_PHRASES or len(sequence[0]) < 4):
+            continue
+        if sequence not in phrases:
+            phrases.append(sequence)
+    return phrases
+
+
+def score_project(text: str, projects: List[Dict[str, Any]]) -> List[Tuple[int, str, List[str]]]:
+    """Deterministic, explainable scoring: (score, slug, reasons).
+
+    Evidence is additive but bounded: naming a project or repo outright is the
+    only strong signal; shared vocabulary can add at most 2 and never wins alone.
+    """
+    text_words = word_tokens(text)
+    text_thai = thai_blob(text)
+    text_set = set(text_words)
+
+    # A word is only evidence when exactly one project's identity or
+    # description uses it, so "api" or "export" cannot pick a project.
+    owners: Dict[str, set] = {}
+    for project in projects:
+        blob = " ".join([project["description"]] + [r["description"] for r in project["repos"].values()])
+        words = set(word_tokens(blob)) | {word for phrase in identity_phrases(project) for word in phrase}
+        for word in words:
+            owners.setdefault(word, set()).add(project["slug"])
+
+    scored: List[Tuple[int, str, List[str]]] = []
+    for project in projects:
+        score = 0
+        reasons: List[str] = []
+        phrases = identity_phrases(project)
+        named = [phrase for phrase in phrases if contains_sequence(text_words, phrase)]
+        if named:
+            score += 10
+            reasons.append("names " + " / ".join("-".join(phrase) for phrase in named[:2]))
+
+        distinctive: List[str] = []
+        blob = " ".join([project["description"]] + [r["description"] for r in project["repos"].values()])
+        for word in sorted(text_set):
+            if len(word) < 5 or word in GENERIC_WORDS or re.search(r"[ก-๙]", word):
+                continue
+            if owners.get(word) == {project["slug"]} and word in set(word_tokens(blob)):
+                distinctive.append(word)
+        if distinctive:
+            score += min(2, len(distinctive))
+            reasons.append("shares " + ", ".join(distinctive[:3]))
+
+        thai_hits: List[str] = []
+        for token in set(re.findall(r"[ก-๙]{4,}", blob.lower())):
+            if token in text_thai and owners.get(token) == {project["slug"]}:
+                thai_hits.append(token)
+        if thai_hits:
+            score += min(2, len(thai_hits))
+            reasons.append("shares Thai term " + ", ".join(thai_hits[:2]))
+
+        scored.append((score, project["slug"], reasons))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored
+
+
+def declared_project(text: str, projects: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A task may name its project explicitly with a `project: <slug>` line."""
+    match = re.search(r"project\s*:\s*([a-z0-9][a-z0-9_-]{2,})", text, re.IGNORECASE)
+    if not match:
+        return None
+    wanted = match.group(1).lower()
+    return next((p for p in projects if p["slug"].lower() == wanted), None)
+
+
+def resolve_project(task: Dict[str, Any], projects: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return {ok, slug, reason, candidates, missing}."""
+    text = " ".join([task.get("name") or "", task.get("description") or ""])
+    list_hits = [p["slug"] for p in projects if LIST_ID in p["list_ids"]]
+    if list_hits:
+        return {"ok": True, "slug": list_hits[0], "reason": "list is registered to this project",
+                "candidates": list_hits, "missing": []}
+    if PROJECT_OVERRIDE:
+        return {"ok": True, "slug": PROJECT_OVERRIDE, "reason": "CLICKUP_WATCH_PROJECT is set",
+                "candidates": [PROJECT_OVERRIDE], "missing": []}
+
+    # A task may name its project explicitly, which always wins over inference.
+    declared = declared_project(text, projects)
+    if declared is not None:
+        return {"ok": True, "slug": declared["slug"], "reason": "description declares project:",
+                "candidates": [declared["slug"]], "missing": []}
+
+    scored = score_project(text, projects)
+    top = scored[0] if scored else (0, "", [])
+    second = scored[1][0] if len(scored) > 1 else 0
+    confident = top[0] >= 8 and (top[0] - second) >= 4
+    candidates = [{"slug": slug, "score": score, "reasons": reasons}
+                  for score, slug, reasons in scored[:3] if score > 0]
+    missing: List[str] = []
+    if not (task.get("description") or "").strip():
+        missing.append("description is empty")
+    if not top[0]:
+        missing.append("task text names no registered project or repo")
+    elif not confident:
+        missing.append("two or more projects score close together")
+    return {
+        "ok": confident,
+        "slug": top[1] if confident else "",
+        "reason": "; ".join(top[2]) if confident else "not confident",
+        "candidates": [c["slug"] for c in candidates],
+        "missing": missing,
+        "scored": candidates,
+    }
+
+
+# ---------------------------------------------------------------------------
+# delivery into the Herdr desktop-app runtime
+# ---------------------------------------------------------------------------
+def hc(*args: str, timeout: int = 30) -> str:
+    if not Path(HC).exists():
+        die(f"herdr-core not found at {HC}")
+    try:
+        result = subprocess.run([HC, *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        die(f"herdr-core {args[0] if args else ''} failed: {error}")
+    if result.returncode != 0:
+        die(f"herdr-core {args[0] if args else ''} failed: {result.stderr.strip()[:300]}")
+    return result.stdout
+
+
+def terminals() -> List[Dict[str, Any]]:
+    """Live terminal list, or empty when herdr-core is unavailable.
+
+    A missing core must degrade to "no pane to send to", never to a crash:
+    the poll still records what it would have done.
+    """
+    if not Path(HC).exists():
+        return []
+    try:
+        listed = subprocess.run([HC, "ls"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if listed.returncode != 0:
+        return []
+    try:
+        data = json.loads(listed.stdout or "{}")
+    except ValueError:
+        return []
+    return data.get("terminals") or []
+
+
+def terminal_where(terminal: Dict[str, Any]) -> str:
+    labels = terminal.get("labels") or {}
+    return labels.get("where") or terminal.get("where") or ""
+
+
+def find_terminal(tab_label: str) -> Optional[str]:
+    wanted = tab_label.strip()
+    for terminal in terminals():
+        where = terminal_where(terminal)
+        if where.rsplit("/", 1)[-1].strip() == wanted and terminal.get("state") == "live":
+            return terminal.get("address")
+    return None
+
+
+def pm_terminal(project: str) -> Optional[str]:
+    """The PM of *that* project.
+
+    Tab labels follow the runtime slug (`pm-ap_intranet`) while the registry
+    keeps the display slug (`ap-intranet`), so both spellings are tried.
+    A generic `pm` pane belongs to another project and is never a fallback.
+    """
+    for candidate in (f"pm-{runtime_slug(project)}", f"pm-{project}"):
+        address = find_terminal(candidate)
+        if address:
+            return address
+    return None
+
+
+def orchestrator_terminal() -> Optional[str]:
+    return find_terminal("orchestrator")
+
+
+# ---------------------------------------------------------------------------
+# briefs
+# ---------------------------------------------------------------------------
+def slugify(text: str, limit: int = 40) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return (slug[:limit].rstrip("-") or "task")
+
+
+def runtime_slug(project: str) -> str:
+    """Mirror bin/herdr-app-team's slugify: the Herdr tab/space name spelling."""
+    return re.sub(r"[^a-z0-9]+", "_", project.lower()).strip("_")
+
+
+def write_brief(task: Dict[str, Any], project: Dict[str, Any],
+                replies: Optional[List[Tuple[str, str, str]]] = None) -> Path:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    briefs = STATE_DIR / "briefs"
+    briefs.mkdir(exist_ok=True)
+    path = briefs / f"{slugify(task['id'])}-{slugify(task.get('name') or 'task')}.md"
+    repos = "\n".join(f"  - {name} ({repo['path']})" for name, repo in sorted(project["repos"].items())) or "  - (none declared)"
+    replies_block = ""
+    if replies:
+        lines = [f"  - [{author or 'human'}] {text}" for _date, author, text in replies]
+        replies_block = ("\nAnswers already given in ClickUp (oldest first) — treat these as decided:\n"
+                         + "\n".join(lines) + "\n")
+    body = f"""[TASK] from: clickup-watch -> to: pm-{project['slug']}
+ClickUp task: {task['id']} — {task.get('name') or '(no name)'}
+URL: {task.get('url') or '(none)'}
+Status at intake: {TRIGGER_STATUS} -> {IN_PROGRESS_STATUS}
+
+Project: {project['slug']} ({project['path']})
+Repos declared for this project:
+{repos}
+
+Dispatch policy (Human-approved intake, no authority granted):
+- Read the task text at the end of this file. It is Human-authored and may be Thai.
+- You own the ClickUp status after intake. Report progress and completion with:
+      {CLI_PATH} mark --task {task['id']} --status ready --text "<what is done + evidence>"
+  Allowed statuses: `in progress`, `discuss`, `ready`. Tick each finished
+  checklist subtask with the same command and its id. `done`, `reject`, and
+  `complete` belong to the Human and are refused by the helper.
+- If a decision or missing information blocks you, put the question into ClickUp
+  so the Human can answer there asynchronously:
+      {CLI_PATH} ask --task {task['id']} --text "<คำถามสั้น ๆ>"
+  That writes a `[herdr-team]` comment and moves the task to `{DISCUSS_STATUS}`.
+  Ask one concrete question per call, then stop and wait. The Human answers in
+  ClickUp and moves the task back to `{TRIGGER_STATUS}`; the next intake brings
+  those answers back to you in this brief.
+- Otherwise reply to the Human in Thai with: the smallest team you propose
+  (Team Proposal), the plan, the exact `Allowed files`, `Required behavior`,
+  `Forbidden scope`, the proposed non-protected `Work branch`, and one explicit
+  question — does the Human want the work to stop at the commit gate
+  (`APPROVE_COMMIT`) or to run with `AUTO_COMMIT`?
+- Do not dispatch to any Worker until the Human approves that plan in this pane.
+- This intake pre-authorizes nothing: no scope, no commit, no push, no PR.
+{replies_block}
+Task text (verbatim):
+---
+{task.get('description') or '(empty description)'}
+---
+Brief file: {path}
+"""
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def dispatch_ping(task: Dict[str, Any], project: Dict[str, Any], brief: Path, target: str) -> str:
+    return "\n".join([
+        f"[TASK] from: clickup-watch -> to: pm-{project['slug']}",
+        f"ClickUp {task['id']} \"{task.get('name') or ''}\" on list {LIST_ID} is now in progress.",
+        f"Brief: {brief}",
+        f"Reply required: [ACK], then follow the brief; report to the Human in this pane.",
+        f"(pane {target})",
+    ])
+
+
+def orchestrator_ping(task: Dict[str, Any], project: Dict[str, Any], brief: Path) -> str:
+    return "\n".join([
+        f"[TASK] from: clickup-watch -> to: orchestrator",
+        f"ClickUp {task['id']} \"{task.get('name') or ''}\" belongs to project {project['slug']} ({project['path']}),",
+        f"but no PM is live for it (expected tab `pm-{runtime_slug(project['slug'])}`).",
+        f"Open the project workspace and start its PM, then hand PM this brief: {brief}",
+        f"Reply required: [ACK] with the PM terminal id. Do not do the work yourself; do not touch ClickUp.",
+    ])
+
+
+# ---------------------------------------------------------------------------
+# intake
+# ---------------------------------------------------------------------------
+def comment_dispatched(task: Dict[str, Any], project: Dict[str, Any], target: str) -> str:
+    return "\n".join([
+        "[herdr-team] รับงานเข้า agent team แล้วค่ะ",
+        f"โปรเจกต์: {project['slug']}",
+        f"ผู้รับงาน: PM (pane {target})",
+        f"สถานะ: {TRIGGER_STATUS} → {IN_PROGRESS_STATUS}",
+        "ขั้นต่อไป: PM จะเสนอแผนและขออนุมัติจากคุณใน PM pane ก่อนเริ่มลงมือ",
+    ])
+
+
+def comment_awaiting_pm(task: Dict[str, Any], project: Dict[str, Any]) -> str:
+    return "\n".join([
+        "[herdr-team] ระบุโปรเจกต์ได้แล้วค่ะ แต่ยังไม่มี PM ของโปรเจกต์นี้เปิดอยู่",
+        f"โปรเจกต์: {project['slug']}",
+        "ระบบได้แจ้ง Orchestrator ให้เปิด project workspace และ PM แล้ว",
+        f"สถานะ: คงไว้ที่ {TRIGGER_STATUS} จนกว่า PM จะพร้อม (ไม่ต้องทำอะไรเพิ่ม)",
+        "เมื่อ PM พร้อม ระบบจะส่งงานเข้า PM และเปลี่ยนสถานะเป็น in progress ให้ค่ะ",
+    ])
+
+
+def comment_escalated(task: Dict[str, Any], resolution: Dict[str, Any]) -> str:
+    candidates = ", ".join(resolution.get("candidates") or []) or "(ไม่มีตัวเลือกที่ใกล้เคียง)"
+    missing = "; ".join(resolution.get("missing") or []) or "ระบุโปรเจกต์ไม่ชัดเจน"
+    return "\n".join([
+        "[herdr-team] ยังระบุโปรเจกต์ของงานนี้ไม่ได้ค่ะ จึงพักไว้ที่สถานะ discuss",
+        f"ข้อมูลที่ยังขาด: {missing}",
+        f"โปรเจกต์ที่ใกล้ที่สุด: {candidates}",
+        "รบกวนตอบกลับโดยเติมบรรทัดนี้ท้าย description: project: <ชื่อโปรเจกต์>",
+        f"แล้วเปลี่ยนสถานะกลับเป็น \"{TRIGGER_STATUS}\" ระบบจะรับงานในรอบถัดไปค่ะ",
+    ])
+
+
+def process_task(mcp: Optional[Mcp], task: Dict[str, Any], projects: List[Dict[str, Any]],
+                 state: Dict[str, Any], args: argparse.Namespace,
+                 forced_project: Optional[Dict[str, Any]] = None) -> None:
+    record = state["tasks"].setdefault(task["id"], {"dispatches": []})
+    if forced_project is not None:
+        # Registry mode: the watched list already names the project, but an
+        # explicit `project: <slug>` line in the task still wins.
+        declared = declared_project(f"{task.get('name') or ''} {task.get('description') or ''}",
+                                   projects)
+        project = declared or forced_project
+        resolution = {"ok": True, "slug": project["slug"],
+                      "reason": "description declares project:" if declared else "registry list mapping",
+                      "candidates": [project["slug"]], "missing": []}
+    else:
+        resolution = resolve_project(task, projects)
+        project = next((p for p in projects if p["slug"] == resolution.get("slug")), None)
+    dry = args.dry_run
+
+    if not resolution["ok"] or project is None:
+        log("escalate", task=task["id"], name=(task.get("name") or "")[:60],
+            candidates=",".join(resolution.get("candidates") or []),
+            missing="; ".join(resolution.get("missing") or []), dry="yes" if dry else "no")
+        if dry:
+            say("  would comment:\n    " + comment_escalated(task, resolution).replace("\n", "\n    "))
+            say(f"  would set status: {DISCUSS_STATUS}")
+            return
+        if args.deliver_to:
+            target = args.deliver_to
+            brief = write_brief(task, {"slug": "(unresolved)", "path": "-", "repos": {}})
+            hc("send", target, f"[TASK] from: clickup-watch -> to: human\nUnresolved ClickUp task "
+                               f"{task['id']} \"{task.get('name') or ''}\" needs a project. Brief: {brief}")
+            log("delivered-escalation", task=task["id"], target=target, brief=str(brief))
+            return
+        assert mcp is not None
+        if not record.get("comment_at"):
+            mcp.comment(task["id"], comment_escalated(task, resolution))
+            record["comment_at"] = now()
+            save_state(state)
+        mcp.set_status(task["id"], DISCUSS_STATUS)
+        record.update({"outcome": "escalated", "at": now()})
+        save_state(state)
+        log("escalated", task=task["id"], status=DISCUSS_STATUS)
+        return
+
+    # Answers the Human already gave in ClickUp travel with the brief, so PM does
+    # not ask the same question twice.
+    replies: List[Tuple[str, str, str]] = []
+    if mcp is not None and not args.fixture:
+        try:
+            replies = mcp.human_replies(task["id"])
+        except SystemExit:
+            replies = []
+    brief = write_brief(task, project, replies)
+    target = args.deliver_to or pm_terminal(project["slug"])
+
+    # No PM yet: the Orchestrator owns project/PM lifecycle and opens the PM.
+    # The task stays in the trigger status so the Human still sees it, and the
+    # request is repeated at most every ORCH_RETRY seconds.
+    if not target:
+        orchestrator = orchestrator_terminal()
+        ping = orchestrator_ping(task, project, brief)
+        log("request-pm" if orchestrator else "no-target", task=task["id"],
+            name=(task.get("name") or "")[:60], project=project["slug"],
+            target=orchestrator or "none", brief=str(brief), dry="yes" if dry else "no")
+        say("  brief:\n    " + brief.read_text(encoding="utf-8").replace("\n", "\n    "))
+        if dry:
+            say("  would keep status: " + TRIGGER_STATUS)
+            say(f"  would comment:\n    " + comment_awaiting_pm(task, project).replace("\n", "\n    "))
+            if orchestrator:
+                say(f"  would ask {orchestrator} to open the PM:\n    " + ping.replace("\n", "\n    "))
+            return
+        if not orchestrator:
+            log("no-target", task=task["id"], project=project["slug"],
+                note="no PM and no Orchestrator pane; left in the trigger status")
+            return
+        last = record.get("orchestrator_ping_at") or ""
+        if last and not args.force:
+            try:
+                age = time.time() - datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+            except ValueError:
+                age = ORCH_RETRY + 1
+            if age < ORCH_RETRY:
+                say(f"clickup-watch: {task['id']} already waiting for a PM "
+                    f"(asked the Orchestrator {int(age)}s ago)")
+                return
+        if mcp is not None and not record.get("comment_at"):
+            mcp.comment(task["id"], comment_awaiting_pm(task, project))
+            record["comment_at"] = now()
+            save_state(state)
+        try:
+            hc("send", orchestrator, ping)
+        except SystemExit:
+            log("delivery-failed", task=task["id"], target=orchestrator)
+            return
+        record.update({"outcome": "awaiting_pm", "project": project["slug"],
+                       "orchestrator_ping_at": now(), "brief": str(brief)})
+        save_state(state)
+        log("requested-pm", task=task["id"], project=project["slug"], target=orchestrator)
+        return
+
+    ping = dispatch_ping(task, project, brief, target)
+    log("dispatch", task=task["id"], name=(task.get("name") or "")[:60],
+        project=project["slug"], target=target, brief=str(brief), dry="yes" if dry else "no")
+    say("  brief:\n    " + brief.read_text(encoding="utf-8").replace("\n", "\n    "))
+
+    if dry:
+        say(f"  would comment:\n    " + comment_dispatched(task, project, target).replace("\n", "\n    "))
+        say(f"  would assign to: {CLAIM_ASSIGNEE or 'nobody'}")
+        say(f"  would set status: {IN_PROGRESS_STATUS}")
+        say(f"  would send to {target}:\n    " + ping.replace("\n", "\n    "))
+        return
+
+    if mcp is not None and not record.get("comment_at"):
+        mcp.comment(task["id"], comment_dispatched(task, project, target))
+        record["comment_at"] = now()
+        save_state(state)
+
+    try:
+        hc("send", target, ping)
+    except SystemExit:
+        log("delivery-failed", task=task["id"], target=target)
+        return
+
+    if mcp is not None:
+        assignment = mcp.claim(task["id"], task.get("assignees") or [])
+        log("claim", task=task["id"], assignee=CLAIM_ASSIGNEE, result=assignment)
+        mcp.set_status(task["id"], IN_PROGRESS_STATUS)
+    record["dispatches"] = (record.get("dispatches") or []) + [now()]
+    record.update({"outcome": "dispatched", "project": project["slug"], "at": now(),
+                   "target": target, "brief": str(brief)})
+    state["last_dispatch"] = {"task": task["id"], "project": project["slug"], "at": now()}
+    save_state(state)
+    log("dispatched", task=task["id"], project=project["slug"], target=target)
+
+
+def watch_targets(projects: List[Dict[str, Any]]) -> List[Tuple[Optional[Dict[str, Any]], str]]:
+    """(project, list_id) pairs this poll should look at.
+
+    Registry mode (the default) follows the project harness: every project whose
+    registry entry sets `clickup.auto_intake: true` contributes each of its
+    registered lists. An explicit list id (CLI/env) overrides that and watches
+    only that list, resolving the project per task.
+    """
+    if LIST_ID:
+        owner = next((p for p in projects if LIST_ID in p["list_ids"]), None)
+        return [(owner, LIST_ID)]
+    targets: List[Tuple[Optional[Dict[str, Any]], str]] = []
+    for project in projects:
+        if not project.get("auto_intake"):
+            continue
+        for list_id in sorted(project["list_ids"]):
+            targets.append((project, list_id))
+    return targets
+
+
+def check_stale(mcp: Optional[Mcp], state: Dict[str, Any], args: argparse.Namespace) -> int:
+    """Nudge tasks the team has held too long without any ClickUp activity.
+
+    ClickUp's `date_updated` is the heartbeat: a status change or a comment bumps
+    it. Silence for `stale_hours` means the work is stuck (dead pane, forgotten
+    task), so the task is commented and parked in `discuss` for the Human.
+    """
+    if mcp is None or STALE_HOURS <= 0:
+        return 0
+    nudged = 0
+    for task_id, record in sorted(state["tasks"].items()):
+        if record.get("outcome") != "dispatched":
+            continue
+        age = age_hours(record.get("at"))
+        if age is None or age < STALE_HOURS:
+            continue
+        try:
+            detail = mcp.get_task(task_id)
+        except SystemExit:
+            log("stale-check-failed", task=task_id)
+            continue
+        status = str(detail.get("status") or "")
+        updated = int(detail.get("date_updated") or 0) / 1000.0
+        if updated > parse_ts(record.get("at")) + 1:
+            record["at"] = now()
+            record["activity_at"] = datetime.fromtimestamp(updated, timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            save_state(state)
+            log("stale-activity", task=task_id, note="ClickUp changed since dispatch; clock reset")
+            continue
+        if status and status != IN_PROGRESS_STATUS:
+            record.update({"outcome": "detached", "at": now()})
+            save_state(state)
+            log("stale-detached", task=task_id, status=status, note="no longer in progress")
+            continue
+
+        body = "\n".join([
+            "[herdr-team] งานนี้ไม่มีความเคลื่อนไหวค่ะ",
+            f"ไม่มีการอัปเดตบน ClickUp มาเกิน {age:.1f} ชั่วโมงนับจากที่ทีมรับงาน",
+            f"ถ้าต้องการให้ทำต่อ: เปลี่ยนสถานะกลับเป็น \"{TRIGGER_STATUS}\"",
+            "ถ้าหยุด หรือต้องให้ข้อมูลเพิ่ม: ตอบในคอมเมนต์นี้ได้เลยค่ะ",
+        ])
+        if args.dry_run:
+            say(f"would nudge {task_id}:\n{body}")
+            nudged += 1
+            continue
+        try:
+            mcp.comment(task_id, body)
+            mcp.set_status(task_id, DISCUSS_STATUS)
+        except SystemExit:
+            log("stale-nudge-failed", task=task_id)
+            continue
+        record.update({"outcome": "awaiting_human", "nudged_at": now(),
+                       "question": f"ไม่มีความเคลื่อนไหว {age:.1f} ชม."})
+        state["tasks"][task_id] = record
+        save_state(state)
+        nudged += 1
+        log("stale-nudge", task=task_id, hours=round(age, 1), status=DISCUSS_STATUS)
+    return nudged
+
+
+def has_tag(task: Dict[str, Any], tag: str) -> bool:
+    """True when the task carries the tag (ClickUp returns names or {name} objects)."""
+    names = set()
+    for item in task.get("tags") or []:
+        name = item.get("name") if isinstance(item, dict) else item
+        if name:
+            names.add(str(name).strip().lower())
+    return tag.strip().lower() in names
+
+
+def fixture_tasks(path: str) -> List[Dict[str, Any]]:
+    data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    tasks = data.get("tasks") if isinstance(data, dict) else data
+    if not isinstance(tasks, list):
+        die(f"fixture must be a list of tasks or {{'tasks': [...]}}: {path}")
+    return tasks
+
+
+def collect_tasks(mcp: Optional[Mcp], list_id: str) -> List[Dict[str, Any]]:
+    """Every task in the trigger status for one list, following pagination."""
+    if mcp is None:
+        return []
+    tasks: List[Dict[str, Any]] = []
+    page = 0
+    while True:
+        payload = mcp.list_tasks(list_id, [TRIGGER_STATUS], page=page)
+        tasks.extend(payload.get("tasks") or [])
+        if not payload.get("has_more"):
+            break
+        page = payload.get("next_page") or page + 1
+        if page > 20:
+            break
+    return tasks
+
+
+def poll(args: argparse.Namespace) -> int:
+    projects = load_registry()
+    state = load_state()
+
+    mcp: Optional[Mcp] = None
+    fixture: Optional[List[Dict[str, Any]]] = None
+    if args.fixture:
+        fixture = fixture_tasks(args.fixture)
+        fixture = [{"status": TRIGGER_STATUS, "url": "", **task} for task in fixture]
+        if args.dry_run is False and not args.deliver_to:
+            args.dry_run = True
+            say("clickup-watch: fixture mode is read-only (no ClickUp writes)")
+    else:
+        mcp = Mcp()
+
+    targets = watch_targets(projects)
+    if not targets:
+        say("clickup-watch: no project enables auto intake — set "
+            "`clickup: { auto_intake: true }` on a project in the registry")
+        log("poll-skipped", note="no auto_intake project with a ClickUp list")
+        state["last_poll"] = {"at": now(), "trigger": TRIGGER_STATUS, "tasks": 0, "handled": 0,
+                              "targets": 0}
+        save_state(state)
+        return 0
+
+    say(f"clickup-watch: {len(targets)} target(s), status '{TRIGGER_STATUS}'"
+        + (f", tag '{REQUIRE_TAG}'" if REQUIRE_TAG else "")
+        + (f", assignee '{REQUIRE_ASSIGNEE}'" if REQUIRE_ASSIGNEE else ""))
+
+    # The lists are shared with people, and each herdr-team person is a
+    # different ClickUp user, so a task is ours only when tagged AND assigned
+    # to this instance's own user.
+    owner_id = ""
+    if REQUIRE_ASSIGNEE:
+        if REQUIRE_ASSIGNEE.isdigit():
+            owner_id = REQUIRE_ASSIGNEE
+        elif mcp is not None:
+            owner_id = mcp.resolve_assignee(REQUIRE_ASSIGNEE)
+        if owner_id:
+            say(f"clickup-watch: own tasks are assigned to {REQUIRE_ASSIGNEE} (user {owner_id})")
+        elif mcp is not None:
+            log("assignee-check-inconclusive",
+                note=f"cannot resolve '{REQUIRE_ASSIGNEE}'; trusting the server-side filter")
+
+    handled = 0
+    seen = 0
+    for project, list_id in targets:
+        if fixture is not None:
+            summaries = fixture
+        else:
+            summaries = collect_tasks(mcp, list_id)
+        label = project["slug"] if project else "(unmapped)"
+        say(f"clickup-watch: {label} list {list_id} -> {len(summaries)} task(s)")
+        seen += len(summaries)
+
+        for summary in summaries:
+            if handled >= args.max_tasks:
+                break
+            task_id = str(summary.get("id") or "")
+            if not task_id:
+                continue
+            if REQUIRE_TAG and not has_tag(summary, REQUIRE_TAG):
+                # Shared list: anything without the tag is not ours, so it is
+                # never commented on, moved, or assigned.
+                log("skip-untagged", task=task_id, list=list_id,
+                    note=f"no tag '{REQUIRE_TAG}'")
+                continue
+            if owner_id:
+                owners = {str(a.get("id") if isinstance(a, dict) else a)
+                          for a in (summary.get("assignees") or [])}
+                if owner_id not in owners:
+                    # Another herdr-team person's watcher owns this task.
+                    log("skip-not-mine", task=task_id, list=list_id,
+                        note=f"assigned to {sorted(owners) or 'nobody'}, not user {owner_id}")
+                    continue
+            record = state["tasks"].get(task_id) or {}
+            if record.get("outcome") == "dispatched" and not args.force:
+                log("skip-known", task=task_id, note="already dispatched; left alone")
+                continue
+            if mcp is not None and not args.fixture and not (summary.get("description") or "").strip():
+                detail = mcp.get_task(task_id)
+            else:
+                detail = {}
+            task = {
+                "id": task_id,
+                "name": summary.get("name") or detail.get("name") or "",
+                "description": summary.get("description") or detail.get("description") or "",
+                "url": summary.get("url") or detail.get("url") or "",
+                "assignees": summary.get("assignees") or [],
+                "list_id": list_id,
+            }
+            process_task(mcp, task, projects, state, args, forced_project=project)
+            handled += 1
+
+    stale = check_stale(mcp, state, args)
+
+    state["last_poll"] = {"at": now(), "trigger": TRIGGER_STATUS, "tasks": seen,
+                          "handled": handled, "targets": len(targets), "stale_nudged": stale}
+    save_state(state)
+    log("poll-done", targets=len(targets), tasks=seen, handled=handled, stale=stale)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# watcher terminal lifecycle
+# ---------------------------------------------------------------------------
+def watcher_terminal() -> Optional[str]:
+    for terminal in terminals():
+        if terminal.get("state") != "live":
+            continue
+        labels = terminal.get("labels") or {}
+        if labels.get("role") == "watcher" and labels.get("name") == TERMINAL_NAME:
+            return terminal.get("address")
+        if terminal_where(terminal).rsplit("/", 1)[-1].strip() == TERMINAL_NAME:
+            return terminal.get("address")
+    return None
+
+
+def app_space_id(name: str) -> str:
+    app = os.environ.get("HERDR_APP_BIN") or shutil.which("herdr-app") or str(HOME / ".local/bin/herdr-app")
+    if not Path(app).exists():
+        return ""
+    try:
+        listed = subprocess.run([app, "ls"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if listed.returncode != 0:
+        return ""
+    try:
+        data = json.loads(listed.stdout or "{}")
+    except ValueError:
+        return ""
+    for space in data.get("spaces") or []:
+        if (space.get("name") or "") == name:
+            return str(space.get("id") or "")
+    return ""
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    ensure_config()
+    address = watcher_terminal()
+    if address:
+        say(f"clickup-watch: already running in {address} (space '{TEAM_SPACE}')")
+        say(f"  config: {CONFIG_FILE} — edit it, then restart to apply")
+        return 0
+    script = Path(__file__).resolve()
+    folder = str(REPO)
+    argv = [str(script), "loop", "--interval", str(args.interval)]
+    started: Dict[str, Any] = {}
+    space_id = app_space_id(TEAM_SPACE)
+    if space_id:
+        # Same mechanism the launcher uses, so the watcher sits in the team
+        # space as its own tab instead of an unfiled terminal.
+        app = os.environ.get("HERDR_APP_BIN") or shutil.which("herdr-app") or str(HOME / ".local/bin/herdr-app")
+        try:
+            created = subprocess.run(
+                [app, "do", "tab.new", "--space", space_id, "--name", TERMINAL_NAME,
+                 "--folder", folder, "--argv", json.dumps(argv)],
+                capture_output=True, text=True, timeout=60,
+            )
+            started = json.loads(created.stdout or "{}")
+            if created.returncode != 0 and not started:
+                started = {}
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            started = {}
+    if not started.get("terminal"):
+        result = hc("run", "--bg", "--name", TERMINAL_NAME, "--outlive-parent",
+                    "--label", "role=watcher", "--label", f"name={TERMINAL_NAME}",
+                    "--cwd", folder, *argv)
+        try:
+            started = json.loads(result) or {}
+        except ValueError:
+            started = {}
+    address = started.get("terminal") or started.get("address") or ""
+    if not address:
+        die(f"the app did not start the watcher terminal: {json.dumps(started)[:200]}")
+    say(f"clickup-watch: started in {address} — every {args.interval}s, "
+        + (f"list {LIST_ID}" if LIST_ID else "every auto_intake project")
+        + f", status '{TRIGGER_STATUS}'")
+    say(f"  read it:  {HC} read {address} --lines 50")
+    say(f"  stop it:  {script} stop")
+    return 0
+
+
+def cmd_stop(_args: argparse.Namespace) -> int:
+    address = watcher_terminal()
+    if not address:
+        say("clickup-watch: no watcher terminal is live")
+        return 0
+    hc("kill", address)
+    # Drop the finished terminal so repeated starts do not pile up dead tabs.
+    for _ in range(5):
+        try:
+            hc("rm", address)
+            break
+        except SystemExit:
+            time.sleep(1)
+    log("watcher-stopped", terminal=address)
+    say(f"clickup-watch: stopped {address}")
+    return 0
+
+
+CONFIG_TEMPLATE = """\
+# clickup-watch — ClickUp intake for the Herdr desktop-app agent team.
+# After editing, restart the watcher:  clickup-watch stop && clickup-watch start
+# Precedence: CLI flag > environment variable > this file > built-in default.
+
+# --- where to watch -------------------------------------------------------
+# Default: follow the project harness registry. Every project whose registry
+# entry sets `clickup: {{ auto_intake: true }}` is polled on each of its
+# registered ClickUp lists; nothing else is looked at.
+#
+# Optional override: set a single list id here (or CLICKUP_WATCH_LIST_ID) to
+# watch just that one list and resolve the project from the task text.
+list_id: "{list_id}"
+
+# Workspace id from the ClickUp URL: app.clickup.com/<workspace_id>/...
+workspace_id: "{workspace_id}"
+
+# Only tasks in this status are considered.
+status: "{status}"
+
+# Opt-in marker: only tasks carrying this tag are picked up. The list is shared
+# with people, so anything without the tag is left completely untouched.
+# Set to "" to watch every task in the list (not recommended on a shared list).
+require_tag: "{require_tag}"
+
+# Ownership: only tasks assigned to this ClickUp user are ours. Every herdr-team
+# person has their own ClickUp login, so this keeps two instances from taking
+# each other's work. "me" = the user behind the MCP login; a numeric user id or
+# an email also works; "" = ignore ownership (not recommended on a shared list).
+require_assignee: "{require_assignee}"
+
+# Who the claimed task is assigned to, so people see it is taken.
+# "me" = the ClickUp user behind the MCP login. "" = never assign.
+# An existing human assignee is never overwritten.
+claim_assignee: "{claim_assignee}"
+# A claimed task moves here, so the next poll never picks it up again.
+in_progress_status: "{in_progress_status}"
+# A task whose project cannot be resolved is parked here for the Human.
+discuss_status: "{discuss_status}"
+
+# Seconds between polls (1800 = every 30 minutes).
+interval: {interval}
+# Tasks claimed per poll (each one waits for Human plan approval; keep it small).
+max_tasks: {max_tasks}
+# A claimed task with no ClickUp activity for this many hours is nudged back to
+# the Human (comment + `discuss`). 0 disables the watchdog.
+stale_hours: {stale_hours}
+# Status PM writes when a task is finished and waiting for Human review.
+ready_status: "{ready_status}"
+# Re-ask the Orchestrator to open a missing PM at most this often.
+orch_retry_seconds: {orch_retry_seconds}
+
+# Optional: force every task on this list into one project slug. Empty = infer.
+project: ""
+
+# Where project and repo knowledge comes from.
+registry: "{registry}"
+# Poller state, briefs and the run log.
+state_dir: "{state_dir}"
+
+# Herdr runtime names.
+terminal_name: "{terminal_name}"
+team_space: "{team_space}"
+herdr_core: "{herdr_core}"
+mcp_url: "{mcp_url}"
+"""
+
+
+def ensure_config(force: bool = False) -> Path:
+    """Write the commented default config when it is missing."""
+    target = CONFIG_FILE
+    if target.exists() and not force:
+        return target
+    values = dict(DEFAULTS)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(CONFIG_TEMPLATE.format(**values), encoding="utf-8")
+    return target
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    target = CONFIG_FILE
+    existed = target.exists()
+    if existed and not args.force:
+        say(f"clickup-watch: config already exists: {target}")
+        say("  edit it there, or pass --force to overwrite with defaults")
+        return 0
+    ensure_config(force=True)
+    say(f"clickup-watch: wrote {target}" + (" (overwrote)" if existed else ""))
+    say("  edit list_id / status / interval there, then: clickup-watch stop && clickup-watch start")
+    return 0
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    """PM → ClickUp: record a question and move the task to `discuss`."""
+    state = load_state()
+    record = state["tasks"].get(args.task)
+    if record is None and not args.force:
+        die(f"{args.task} was not dispatched by this watcher; refusing to move it "
+            "(use --force only if you really mean it)")
+    record = record or {"dispatches": []}
+
+    text = ""
+    if args.comment_file:
+        path = Path(args.comment_file).expanduser()
+        if not path.is_file():
+            die(f"comment file not readable: {path}")
+        text = path.read_text(encoding="utf-8").strip()
+    elif args.text:
+        text = args.text.strip()
+    if not text:
+        die("ask needs --text or --comment-file")
+
+    body = "\n".join([
+        "[herdr-team] มีคำถามก่อนดำเนินการต่อค่ะ",
+        text,
+        "",
+        f"ตอบกลับได้ที่ comment นี้ แล้วเปลี่ยนสถานะกลับเป็น \"{TRIGGER_STATUS}\" "
+        f"— ระบบจะส่งงานเข้า PM อีกครั้งพร้อมคำตอบของคุณค่ะ",
+    ])
+    if args.dry_run:
+        say(f"would comment on {args.task}:\n{body}")
+        say(f"would set status: {DISCUSS_STATUS}")
+        return 0
+
+    mcp = Mcp()
+    mcp.comment(args.task, body)
+    mcp.set_status(args.task, DISCUSS_STATUS)
+    record.update({"outcome": "awaiting_human", "asked_at": now(), "question": text[:300]})
+    state["tasks"][args.task] = record
+    save_state(state)
+    log("asked", task=args.task, status=DISCUSS_STATUS)
+    say(f"clickup-watch: question posted on {args.task}; status is now '{DISCUSS_STATUS}'")
+    say("  the Human answers in ClickUp and moves it back to "
+        f"'{TRIGGER_STATUS}' — the next poll re-dispatches with the answer")
+    return 0
+
+
+MARK_LABEL = {
+    "in progress": "กำลังดำเนินการ",
+    "discuss": "ต้องการข้อมูล/คำตอบจากคุณ",
+    "ready": "งานเสร็จแล้ว รอตรวจ/อนุมัติจากคุณ",
+}
+
+
+def mark_statuses() -> Dict[str, str]:
+    """Statuses the agent may write, keyed by the name it is asked for."""
+    return {"in progress": IN_PROGRESS_STATUS, "discuss": DISCUSS_STATUS,
+            "ready": READY_STATUS}
+
+
+def cmd_mark(args: argparse.Namespace) -> int:
+    """PM → ClickUp: advance a task's status with a comment.
+
+    PM owns status hygiene; Workers never touch ClickUp. Only the statuses that
+    describe team progress are writable here — closing, rejecting, and release
+    statuses stay with the Human.
+    """
+    allowed_statuses = mark_statuses()
+    wanted = " ".join(args.status.strip().lower().split())
+    if wanted not in allowed_statuses:
+        die(f"status '{args.status}' is not writable by the agent "
+            f"(allowed: {', '.join(sorted(allowed_statuses))})")
+    text = ""
+    if args.comment_file:
+        path = Path(args.comment_file).expanduser()
+        if not path.is_file():
+            die(f"comment file not readable: {path}")
+        text = path.read_text(encoding="utf-8").strip()
+    elif args.text:
+        text = args.text.strip()
+
+    state = load_state()
+    record = state["tasks"].get(args.task)
+    allowed = record is not None
+    mcp: Optional[Mcp] = None
+    if not allowed and args.force:
+        allowed = True
+    if not allowed:
+        # A subtask is not an intake unit, so accept one that this agent already
+        # owns instead of demanding --force on every checklist tick.
+        mcp = Mcp()
+        detail = mcp.get_task(args.task)
+        owners = {str(a.get("id") if isinstance(a, dict) else a)
+                  for a in (detail.get("assignees") or [])}
+        me = mcp.resolve_assignee(CLAIM_ASSIGNEE) if CLAIM_ASSIGNEE else ""
+        allowed = bool(me and me in owners)
+    if not allowed:
+        die(f"{args.task} is not tracked by this watcher and is not assigned to "
+            f"{CLAIM_ASSIGNEE or 'this agent'}; refusing to change it")
+
+    body = f"[herdr-team] {MARK_LABEL.get(wanted, wanted)}"
+    if text:
+        body += "\n" + text
+
+    if args.dry_run:
+        say(f"would comment on {args.task}:\n{body}")
+        say(f"would set status: {allowed_statuses[wanted]}")
+        return 0
+
+    mcp = mcp or Mcp()
+    mcp.comment(args.task, body)
+    mcp.set_status(args.task, allowed_statuses[wanted])
+    if record is not None:
+        record["last_mark"] = {"status": allowed_statuses[wanted], "at": now()}
+        if wanted == "discuss":
+            record["outcome"] = "awaiting_human"
+        elif wanted == "ready":
+            record["outcome"] = "ready"
+        state["tasks"][args.task] = record
+        save_state(state)
+    log("marked", task=args.task, status=allowed_statuses[wanted])
+    say(f"clickup-watch: {args.task} → '{allowed_statuses[wanted]}'")
+    return 0
+
+
+def cmd_check(_args: argparse.Namespace) -> int:
+    """Readiness only: no network, no writes."""
+    problems = 0
+    if CONFIG_FILE.is_file():
+        say(f"  ok:   config: {CONFIG_FILE}")
+    else:
+        say(f"  note: no config file yet ({CONFIG_FILE}) — defaults in use; run: clickup-watch init")
+    try:
+        projects = load_registry()
+        say(f"  ok:   registry: {REGISTRY} ({len(projects)} project(s))")
+        if LIST_ID:
+            say(f"  ok:   watching one list: {LIST_ID} (override)")
+        else:
+            enabled = [p for p in projects if p.get("auto_intake") and p["list_ids"]]
+            if enabled:
+                say(f"  ok:   auto intake enabled for {len(enabled)} project(s): "
+                    + ", ".join(f"{p['slug']} ({len(p['list_ids'])} list(s))" for p in enabled))
+            else:
+                say("  note: no project sets `clickup: { auto_intake: true }` — "
+                    "a poll would do nothing")
+    except SystemExit:
+        problems += 1
+    try:
+        load_token()
+        say("  ok:   ClickUp MCP login found")
+    except SystemExit:
+        say("  MISS: ClickUp MCP login — run: pi mcp login clickup")
+        problems += 1
+    if Path(HC).exists():
+        say(f"  ok:   herdr-core: {HC}")
+    else:
+        say(f"  MISS: herdr-core not found ({HC})")
+        problems += 1
+    if LIST_ID and not LIST_ID.isdigit():
+        say(f"  MISS: list_id must be a ClickUp list id (got '{LIST_ID}')")
+        problems += 1
+    say(f"  ok:   trigger '{TRIGGER_STATUS}'"
+        + (f" + tag '{REQUIRE_TAG}'" if REQUIRE_TAG else " (any tag)")
+        + (f" + assignee '{REQUIRE_ASSIGNEE}'" if REQUIRE_ASSIGNEE else " (any assignee)")
+        + f", claim assignee '{CLAIM_ASSIGNEE or 'none'}', interval {INTERVAL}s")
+    return 0 if problems == 0 else 1
+
+
+def queue_report(state: Dict[str, Any]) -> List[str]:
+    """Human-readable queue: what waits for the Human, what the team holds."""
+    waiting: List[Tuple[float, str]] = []
+    held: List[Tuple[float, str]] = []
+    for task_id, record in state.get("tasks", {}).items():
+        outcome = record.get("outcome")
+        age = age_hours(record.get("asked_at") or record.get("nudged_at") or record.get("at"))
+        age_text = f"{age:.1f}h" if age is not None else "?"
+        project = record.get("project") or "-"
+        if outcome == "awaiting_human":
+            question = (record.get("question") or "").replace("\n", " ")[:70]
+            waiting.append((age or 0.0,
+                            f"             - {task_id} {project} — waiting {age_text}: {question}"))
+        elif outcome == "ready":
+            waiting.append((age or 0.0,
+                            f"             - {task_id} {project} — finished, awaiting review {age_text}"))
+        elif outcome in ("dispatched", "awaiting_pm"):
+            label = "no PM yet" if outcome == "awaiting_pm" else "with the team"
+            held.append((age or 0.0,
+                         f"             - {task_id} {project} — {label} {age_text}"))
+    lines: List[str] = []
+    lines.append(f"queue:       {len(waiting)} waiting for you, {len(held)} with the team")
+    for _age, line in sorted(waiting, reverse=True) + sorted(held, reverse=True):
+        lines.append(line)
+    return lines
+
+
+def cmd_status(_args: argparse.Namespace) -> int:
+    address = watcher_terminal()
+    state = load_state()
+    say(f"config:      {CONFIG_FILE}" + ("" if CONFIG_FILE.is_file() else " (missing — defaults in use)"))
+    try:
+        projects = load_registry()
+    except SystemExit:
+        projects = []
+    if LIST_ID:
+        say(f"watching:    single list {LIST_ID} (config override)")
+    else:
+        enabled = [p for p in projects if p.get("auto_intake") and p["list_ids"]]
+        say(f"watching:    registry — {len(enabled)} project(s) with auto_intake")
+        for project in enabled:
+            say(f"             - {project['slug']}: {', '.join(sorted(project['list_ids']))}")
+        if not enabled:
+            say("             (none — set `clickup: { auto_intake: true }` in the registry)")
+    say(f"workspace:   {WORKSPACE_ID}")
+    say(f"trigger:     status '{TRIGGER_STATUS}' -> '{IN_PROGRESS_STATUS}'"
+        + (f", tag '{REQUIRE_TAG}'" if REQUIRE_TAG else ", any tag")
+        + (f", assignee '{REQUIRE_ASSIGNEE}'" if REQUIRE_ASSIGNEE else ", any assignee")
+        + f", claim assignee '{CLAIM_ASSIGNEE or 'none'}'")
+    say(f"terminal:    {address or 'not running'}" + (f" (space '{TEAM_SPACE}')" if address else ""))
+    last = state.get("last_poll") or {}
+    say(f"last poll:   {last.get('at') or 'never'} ({last.get('tasks', 0)} task(s), {last.get('handled', 0)} handled)")
+    dispatch = state.get("last_dispatch") or {}
+    say(f"last dispatch: {dispatch.get('at') or 'never'}"
+        + (f" — {dispatch.get('project')} / {dispatch.get('task')}" if dispatch else ""))
+    queue_lines = queue_report(state)
+    for line in queue_lines:
+        say(line)
+    try:
+        load_token()
+        say("mcp token:   found")
+    except SystemExit:
+        say("mcp token:   MISSING (run: pi mcp login clickup)")
+    return 0
+
+
+def cmd_loop(args: argparse.Namespace) -> int:
+    stopping = {"flag": False}
+
+    def stop(signum, _frame):  # noqa: ANN001
+        stopping["flag"] = True
+        say(f"clickup-watch: received signal {signum}; finishing after this poll")
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    say(f"clickup-watch: loop every {args.interval}s"
+        + (f", watching list {LIST_ID}" if LIST_ID else ", following the project registry")
+        + f", status '{TRIGGER_STATUS}' (config {CONFIG_FILE})")
+    while not stopping["flag"]:
+        started = time.time()
+        try:
+            with Lock():
+                poll(args)
+        except SystemExit as error:
+            if error.code not in (0, None, 3):
+                log("poll-error", code=error.code)
+        elapsed = time.time() - started
+        wait = max(5, args.interval - elapsed)
+        deadline = time.time() + wait
+        while time.time() < deadline and not stopping["flag"]:
+            time.sleep(min(5, max(0, deadline - time.time())))
+    say("clickup-watch: stopped")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# cli
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="clickup-watch", description=__doc__.splitlines()[0])
+    parser.add_argument("--config", help=f"config file (default: {CONFIG_FILE})")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def poll_flags(target: argparse.ArgumentParser) -> None:
+        target.add_argument("--dry-run", action="store_true", help="read only: no ClickUp writes unless --deliver-to")
+        target.add_argument("--fixture", help="read tasks from a JSON file instead of ClickUp (test mode)")
+        target.add_argument("--max-tasks", type=int, help="tasks per poll (default from config)")
+        target.add_argument("--deliver-to", help="send to this herdr-core terminal instead of resolving the PM")
+        target.add_argument("--force", action="store_true", help="re-process tasks this watcher already dispatched")
+
+    once = sub.add_parser("once", help="one poll, then exit")
+    poll_flags(once)
+    once.set_defaults(func=lambda args: poll(args))
+
+    loop = sub.add_parser("loop", help="poll forever")
+    poll_flags(loop)
+    loop.add_argument("--interval", type=int, help="seconds between polls (default from config)")
+    loop.set_defaults(func=cmd_loop)
+
+    start = sub.add_parser("start", help="start the watched terminal in Herdr")
+    start.add_argument("--interval", type=int, help="seconds between polls (default from config)")
+    start.set_defaults(func=cmd_start)
+
+    init = sub.add_parser("init", help="write the config file with commented defaults")
+    init.add_argument("--force", action="store_true", help="overwrite an existing config file")
+    init.set_defaults(func=cmd_init)
+
+    ask = sub.add_parser("ask", help="record a PM question on the ClickUp task and park it in discuss")
+    ask.add_argument("--task", required=True, help="ClickUp task id")
+    ask.add_argument("--text", help="question text")
+    ask.add_argument("--comment-file", help="file holding the question (preferred for long text)")
+    ask.add_argument("--force", action="store_true", help="allow a task this watcher did not dispatch")
+    ask.add_argument("--dry-run", action="store_true", help="print the comment without writing")
+    ask.set_defaults(func=cmd_ask)
+
+    mark = sub.add_parser("mark", help="advance a task/subtask status with a comment (PM-owned)")
+    mark.add_argument("--task", required=True, help="ClickUp task or subtask id")
+    mark.add_argument("--status", required=True,
+                      help="in progress | discuss | ready (closing statuses stay with the Human)")
+    mark.add_argument("--text", help="short note for the comment")
+    mark.add_argument("--comment-file", help="file holding the note (preferred for long text)")
+    mark.add_argument("--force", action="store_true", help="allow a task this watcher never dispatched")
+    mark.add_argument("--dry-run", action="store_true", help="print the change without writing")
+    mark.set_defaults(func=cmd_mark)
+
+    status = sub.add_parser("status", help="show watcher state (and the config in use)")
+    status.set_defaults(func=cmd_status)
+
+    check = sub.add_parser("check", help="readiness only: config, registry, MCP login, herdr-core")
+    check.set_defaults(func=cmd_check)
+
+    stop = sub.add_parser("stop", help="stop the watcher terminal")
+    stop.set_defaults(func=cmd_stop)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    global CONFIG_FILE
+    args = build_parser().parse_args(argv)
+    if getattr(args, "config", None):
+        CONFIG_FILE = Path(args.config).expanduser()
+    apply_config()
+    for name, value in (("interval", INTERVAL), ("max_tasks", MAX_TASKS)):
+        if hasattr(args, name) and getattr(args, name) is None:
+            setattr(args, name, value)
+    try:
+        return int(args.func(args) or 0)
+    except SystemExit as error:
+        return int(error.code or 0)
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

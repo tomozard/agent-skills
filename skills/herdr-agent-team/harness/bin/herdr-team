@@ -1,0 +1,749 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_TEAM_BOOTSTRAP_CLAIM:-}" ]; then
+  if mkdir "$HERDR_TEAM_BOOTSTRAP_CLAIM" 2>/dev/null; then
+    export SHELL="${HERDR_TEAM_ORIGINAL_SHELL:-/bin/sh}"
+    unset HERDR_TEAM_BOOTSTRAP_CLAIM HERDR_TEAM_ORIGINAL_SHELL
+    # Herdr may invoke SHELL as a login shell (for example, with `-l`).
+    # Those flags belong to the shell bootstrap, not to this launcher.
+    set --
+  else
+    ORIGINAL_SHELL="${HERDR_TEAM_ORIGINAL_SHELL:-/bin/sh}"
+    if [ "$(uname -s)" = "Darwin" ]; then
+      exec -a "-$(basename "$ORIGINAL_SHELL")" "$ORIGINAL_SHELL"
+    fi
+    exec "$ORIGINAL_SHELL"
+  fi
+fi
+
+COMMAND="start"
+RUNTIME="${HERDR_TEAM_RUNTIME:-auto}"
+MODEL="${HERDR_TEAM_MODEL:-}"
+CWD="${HERDR_TEAM_CWD:-$HOME/Workspaces}"
+REGISTRY="${HERDR_TEAM_REGISTRY:-}"
+VAULT_PATH="${HERDR_TEAM_VAULT_PATH:-$HOME/Workspaces/vault}"
+ACTIVITY_LOG="${HERDR_TEAM_ACTIVITY_LOG:-}"
+SESSION="${HERDR_TEAM_SESSION:-default}"
+VOICE_MODE="${HERDR_TEAM_VOICE:-off}"
+VOICE_EXPLICIT=0
+
+usage() {
+  cat <<'EOF'
+Usage: herdr-team [start|check] [options]
+
+Start the global Orchestrator after validating the installed Herdr harness.
+With no subcommand, herdr-team defaults to start.
+
+Options:
+  --runtime auto|pi         Orchestrator runtime (fixed to Pi; default: auto)
+  --model MODEL             Allowlisted Orchestrator model override
+  --cwd PATH                Global Orchestrator working directory
+  --registry PATH           Workspace registry (default: CWD/.agents/workspace-registry.yaml)
+  --vault-path PATH         Vault root (default: HOME/Workspaces/vault)
+  --activity-log PATH       OKF activity log (default: VAULT/log.md)
+  --session NAME            Herdr session (default: default)
+  --voice on|off            Speak the active Orchestrator/PM summary (default: off)
+  -h, --help                Show this help
+EOF
+}
+
+case "${1:-}" in
+  start|check|shutdown-finalizer) COMMAND="$1"; shift ;;
+esac
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --runtime) RUNTIME="${2:-}"; shift 2 ;;
+    --model) MODEL="${2:-}"; shift 2 ;;
+    --cwd) CWD="${2:-}"; shift 2 ;;
+    --registry) REGISTRY="${2:-}"; shift 2 ;;
+    --vault-path) VAULT_PATH="${2:-}"; shift 2 ;;
+    --activity-log) ACTIVITY_LOG="${2:-}"; shift 2 ;;
+    --session) SESSION="${2:-}"; shift 2 ;;
+    --voice)
+      case "${2:-}" in
+        on|off) VOICE_MODE="$2"; VOICE_EXPLICIT=1; shift 2 ;;
+        *) echo "herdr-team: --voice must be on or off" >&2; exit 2 ;;
+      esac
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "herdr-team: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$RUNTIME" in
+  auto|pi) ;;
+  *) echo "herdr-team: Orchestrator runtime is fixed to pi" >&2; exit 2 ;;
+esac
+
+case "$VOICE_MODE" in
+  on|off) ;;
+  *) echo "herdr-team: voice mode must be on or off" >&2; exit 2 ;;
+esac
+
+if [ -z "$SESSION" ]; then
+  echo "herdr-team: session name must not be empty" >&2
+  exit 2
+fi
+
+CWD="$(python3 -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$CWD")"
+REGISTRY="${REGISTRY:-$CWD/.agents/workspace-registry.yaml}"
+REGISTRY="$(python3 -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$REGISTRY")"
+VAULT_PATH="$(python3 -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$VAULT_PATH")"
+ACTIVITY_LOG="${ACTIVITY_LOG:-$VAULT_PATH/log.md}"
+ACTIVITY_LOG="$(python3 -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$ACTIVITY_LOG")"
+AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_BIN="$SCRIPT_DIR/agent-runtime"
+SHUTDOWN_STATE_DIR="${HERDR_TEAM_STATE_DIR:-${TMPDIR:-/tmp}/herdr-team}"
+SESSION_TOKEN="${SESSION//[^a-zA-Z0-9_.-]/_}"
+SHUTDOWN_MARKER="$SHUTDOWN_STATE_DIR/$SESSION_TOKEN.shutdown-requested"
+SHUTDOWN_SIGNAL="$SHUTDOWN_STATE_DIR/$SESSION_TOKEN.shutdown-signal"
+SHUTDOWN_FINALIZER_LOCK="$SHUTDOWN_STATE_DIR/$SESSION_TOKEN.shutdown-finalizer"
+SHUTDOWN_FINALIZER_LOG="$SHUTDOWN_STATE_DIR/$SESSION_TOKEN.shutdown-finalizer.log"
+VOICE_OWNER_FILE="${HERDR_VOICE_OWNER_FILE:-$SHUTDOWN_STATE_DIR/$SESSION_TOKEN.voice-owner}"
+ERRORS=0
+
+if [ "$COMMAND" = "shutdown-finalizer" ]; then
+  : "${HERDR_SHUTDOWN_SIGNAL_PATH:?shutdown signal path is required}"
+  : "${HERDR_SHUTDOWN_MARKER_PATH:?shutdown marker path is required}"
+  : "${HERDR_SHUTDOWN_FINALIZER_LOCK_PATH:?shutdown finalizer lock path is required}"
+
+  exec 3<> "$HERDR_SHUTDOWN_SIGNAL_PATH"
+  shutdown_pane=""
+  if ! IFS= read -r shutdown_pane <&3; then
+    echo "herdr-team: detached shutdown finalizer did not receive a request" >&2
+    exit 1
+  fi
+  exec 3>&-
+  expected_shutdown_pane="$(cat "$HERDR_SHUTDOWN_MARKER_PATH" 2>/dev/null || true)"
+  if [ -n "$expected_shutdown_pane" ] \
+    && [ "$shutdown_pane" != "$expected_shutdown_pane" ]; then
+    echo "herdr-team: detached shutdown finalizer received an unexpected pane" >&2
+    rm -f "$HERDR_SHUTDOWN_SIGNAL_PATH"
+    rm -f "$HERDR_SHUTDOWN_FINALIZER_LOCK_PATH/pid"
+    rmdir "$HERDR_SHUTDOWN_FINALIZER_LOCK_PATH" 2>/dev/null || true
+    exit 1
+  fi
+
+  echo "Shutdown handoff received for pane $shutdown_pane"
+  if ! herdr pane run "$shutdown_pane" "/quit"; then
+    echo "herdr-team: unable to queue /quit; continuing with server shutdown" >&2
+  else
+    sleep "${HERDR_SUBMIT_DELAY_SECONDS:-1}"
+    if ! herdr pane send-keys "$shutdown_pane" enter; then
+      echo "herdr-team: Orchestrator pane exited before the Enter safeguard" >&2
+    fi
+  fi
+
+  rm -f "$HERDR_SHUTDOWN_SIGNAL_PATH"
+  rm -f "$HERDR_SHUTDOWN_FINALIZER_LOCK_PATH/pid"
+  rmdir "$HERDR_SHUTDOWN_FINALIZER_LOCK_PATH" 2>/dev/null || true
+  echo "Stopping Herdr server from detached external finalizer"
+  exec herdr server stop
+fi
+
+export HERDR_TEAM_VOICE="$VOICE_MODE"
+export HERDR_VOICE_MODE="$VOICE_MODE"
+export HERDR_VOICE_OWNER_FILE="$VOICE_OWNER_FILE"
+if [ "$VOICE_MODE" = "on" ]; then
+  export HERDR_VOICE_NOTIFY=1
+else
+  export HERDR_VOICE_NOTIFY=0
+fi
+
+ok() {
+  printf '  ok: %s\n' "$1"
+}
+
+bad() {
+  printf '  error: %s\n' "$1" >&2
+  ERRORS=$((ERRORS + 1))
+}
+
+check_command() {
+  local command_name="$1"
+  if command -v "$command_name" >/dev/null 2>&1; then
+    ok "$command_name found"
+  else
+    bad "$command_name not found"
+  fi
+}
+
+pi_healthy() {
+  command -v pi >/dev/null 2>&1 && pi --version >/dev/null 2>&1
+}
+
+claude_healthy() {
+  command -v claude >/dev/null 2>&1 && claude --version >/dev/null 2>&1
+}
+
+check_harness() {
+  local binary skill
+
+  echo "Checking minimal Herdr agent-team harness"
+
+  check_command herdr
+  if command -v herdr >/dev/null 2>&1 && herdr --version >/dev/null 2>&1; then
+    ok "Herdr healthy"
+  else
+    bad "Herdr failed its health check"
+  fi
+
+  if [ -d "$CWD" ]; then
+    ok "working directory: $CWD"
+  else
+    bad "working directory does not exist: $CWD"
+  fi
+
+  if [ -r "$REGISTRY" ] && grep -q '^workspace_root:' "$REGISTRY" \
+    && grep -q '^projects:' "$REGISTRY"; then
+    ok "workspace registry: $REGISTRY"
+  else
+    bad "workspace registry is missing or invalid: $REGISTRY"
+  fi
+
+  if [ -d "$VAULT_PATH" ] && [ -d "$(dirname "$ACTIVITY_LOG")" ]; then
+    ok "vault root: $VAULT_PATH"
+    ok "OKF activity log: $ACTIVITY_LOG"
+  else
+    bad "vault or activity-log directory is missing: $VAULT_PATH / $(dirname "$ACTIVITY_LOG")"
+  fi
+
+  if [ -x "$RUNTIME_BIN" ]; then
+    ok "agent-runtime installed"
+  else
+    bad "agent-runtime is missing beside herdr-team"
+  fi
+  for binary in spawn-agent verify-pane-agent agent-team-shutdown validate-okf voice-notify; do
+    if [ -x "$SCRIPT_DIR/$binary" ]; then
+      ok "$binary installed"
+    else
+      bad "$binary is missing beside herdr-team"
+    fi
+  done
+
+  for guard in git gh; do
+    if [ -x "$AGENTS_HOME/guard-bin/$guard" ]; then
+      ok "command guard installed: $guard"
+    else
+      bad "command guard is missing: $guard"
+    fi
+  done
+
+  for skill in herdr agent-team agent-shared; do
+    if [ -r "$AGENTS_HOME/skills/$skill/SKILL.md" ]; then
+      ok "skill installed: $skill"
+    else
+      bad "skill missing: $skill"
+    fi
+    if [ -r "$HOME/.claude/skills/$skill/SKILL.md" ]; then
+      ok "Claude skill installed: $skill"
+    else
+      bad "Claude skill missing: $skill"
+    fi
+  done
+
+  if [ -r "$AGENTS_HOME/protocols/communication.md" ]; then
+    ok "communication protocol installed"
+  else
+    bad "communication protocol is missing"
+  fi
+
+  if [ -r "$AGENTS_HOME/team.json" ] && [ -d "$AGENTS_HOME/agents" ]; then
+    if python3 - "$AGENTS_HOME" "$HOME/.claude/agents" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+agents_home = Path(sys.argv[1])
+claude_home = Path(sys.argv[2])
+expected = {
+    "orchestrator", "pm", "supervisor", "sa", "investigator",
+    "researcher", "designer", "documenter", "coder", "refactor", "reviewer", "tester",
+}
+try:
+    team = json.loads((agents_home / "team.json").read_text())
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+roles = set(team.get("roles", {}))
+role_files = {path.stem for path in (agents_home / "agents").glob("*.md")}
+claude_files = {
+    path.name.removeprefix("herdr-").removesuffix(".md")
+    for path in claude_home.glob("herdr-*.md")
+}
+writers = {"coder", "refactor"}
+committers = {"supervisor", "coder", "refactor"}
+remote_operators = {"supervisor", "coder", "refactor"}
+disabled_providers = team.get("disabled_model_providers", [])
+
+def model_provider(model):
+    return model.split("/", 1)[0] if isinstance(model, str) and "/" in model else None
+
+def provider_is_disabled(model):
+    return model_provider(model) in disabled_providers
+
+configured_providers = {
+    model_provider(model)
+    for config in team.get("roles", {}).values()
+    if isinstance(config, dict)
+    for models in config.get("models", {}).values()
+    if isinstance(models, list)
+    for model in models
+    if model_provider(model)
+}
+provider_config_valid = (
+    isinstance(disabled_providers, list)
+    and all(
+        isinstance(provider, str)
+        and bool(provider)
+        and provider.strip() == provider
+        and "/" not in provider
+        for provider in disabled_providers
+    )
+    and len(disabled_providers) == len(set(disabled_providers))
+    and set(disabled_providers) <= configured_providers
+)
+
+def valid_pair(pair, models):
+    return (
+        isinstance(pair, dict)
+        and set(pair) == {"runtime", "model"}
+        and pair.get("model") in models.get(pair.get("runtime"), [])
+    )
+
+def valid_routing(config):
+    if config.get("model_selection") == "fixed":
+        return "routing" not in config
+    routing = config.get("routing")
+    if not isinstance(routing, dict) or set(routing) != {"standard", "critical"}:
+        return False
+    models = config.get("models", {})
+    for route in routing.values():
+        if not isinstance(route, dict) or set(route) != {"primary", "alternates"}:
+            return False
+        alternates = route.get("alternates")
+        if not valid_pair(route.get("primary"), models) or not isinstance(alternates, list):
+            return False
+        pairs = [(pair.get("runtime"), pair.get("model")) for pair in alternates if isinstance(pair, dict)]
+        primary = (route["primary"]["runtime"], route["primary"]["model"])
+        if (
+            not all(valid_pair(pair, models) for pair in alternates)
+            or primary in pairs
+            or len(pairs) != len(set(pairs))
+        ):
+            return False
+    return True
+
+capabilities_valid = all(
+    config.get("repo_mode") == ("write" if name in writers else "read_only")
+    and config.get("may_local_commit") == (name in committers)
+    and config.get("may_authorized_push") == (name in remote_operators)
+    and config.get("may_authorized_pr_create") == (name in remote_operators)
+    and config.get("may_remote_deliver") is False
+    and config.get("may_document_write", False) == (name == "documenter")
+    and config.get("may_vault_read", False) == (name == "investigator")
+    and config.get("model_selection") in {"fixed", "controller"}
+    and isinstance(config.get("models"), dict)
+    and bool(config.get("models"))
+    and all(
+        runtime in {"pi", "claude"}
+        and isinstance(models, list)
+        and bool(models)
+        and all(isinstance(model, str) and model for model in models)
+        and len(models) == len(set(models))
+        for runtime, models in config.get("models", {}).items()
+    )
+    and any(
+        not provider_is_disabled(model)
+        for models in config.get("models", {}).values()
+        for model in models
+    )
+    and not (
+        config.get("model_selection") == "fixed"
+        and provider_is_disabled(config.get("default_model"))
+    )
+    and valid_routing(config)
+    for name, config in team.get("roles", {}).items()
+)
+def report_parents(value):
+    if isinstance(value, str):
+        return [value]
+    return value if isinstance(value, list) else []
+
+ownership_valid = all(
+    all(
+        parent == "human"
+        or (
+            parent in team.get("roles", {})
+            and name in team["roles"][parent].get("controls", [])
+        )
+        for parent in report_parents(config.get("reports_to"))
+    )
+    for name, config in team.get("roles", {}).items()
+)
+selection_valid = (
+    team.get("roles", {}).get("orchestrator", {}).get("model_selection") == "fixed"
+    and team.get("roles", {}).get("orchestrator", {}).get("models") == {
+        "pi": ["antigravity/gemini-3.8-flash"]
+    }
+    and team.get("roles", {}).get("orchestrator", {}).get("default_model")
+        == "antigravity/gemini-3.8-flash"
+    and team.get("roles", {}).get("pm", {}).get("model_selection") == "fixed"
+    and team.get("roles", {}).get("pm", {}).get("models") == {
+        "pi": ["antigravity/gemini-3.8-flash"]
+    }
+    and team.get("roles", {}).get("pm", {}).get("default_model")
+        == "antigravity/gemini-3.8-flash"
+    and team.get("roles", {}).get("designer", {}).get("model_selection") == "fixed"
+    and team.get("roles", {}).get("designer", {}).get("models") == {
+        "claude": ["opus"]
+    }
+    and team.get("roles", {}).get("designer", {}).get("default_model")
+        == "opus"
+    and all(
+        config.get("model_selection") == "controller"
+        for name, config in team.get("roles", {}).items()
+        if name not in {"orchestrator", "pm", "designer"}
+    )
+)
+raise SystemExit(0 if (
+    team.get("version") == 4
+    and team.get("runtime_order") == ["pi", "claude"]
+    and provider_config_valid
+    and roles == expected
+    and role_files == expected
+    and expected <= claude_files
+    and capabilities_valid
+    and ownership_valid
+    and selection_valid
+) else 1)
+PY
+    then
+      ok "12 roles, runtime models, Claude agents, and capabilities installed"
+    else
+      bad "team roles or Claude agents are incomplete"
+    fi
+  else
+    bad "team.json or role directory is missing"
+  fi
+
+  case "$RUNTIME" in
+    auto)
+      if pi_healthy; then
+        ok "Pi healthy; auto will select Pi"
+      else
+        bad "Pi failed its health check; Orchestrator has no fallback runtime"
+      fi
+      ;;
+    pi)
+      if pi_healthy; then ok "Pi healthy"; else bad "Pi failed its health check"; fi
+      ;;
+  esac
+
+  if [ "${HERDR_ENV:-}" = "1" ]; then
+    ok "running inside Herdr"
+  else
+    printf '  info: outside Herdr; start will open Herdr and launch Orchestrator automatically\n'
+  fi
+
+  if [ "$ERRORS" -gt 0 ]; then
+    echo "Harness check failed: $ERRORS error(s)" >&2
+    return 1
+  fi
+  echo "Harness check passed"
+}
+
+validate_orchestrator_model() {
+  [ -n "$MODEL" ] || return 0
+  python3 - "$AGENTS_HOME/team.json" "$RUNTIME" "$MODEL" <<'PY'
+import json
+import sys
+
+team_path, requested_runtime, requested_model = sys.argv[1:]
+with open(team_path, encoding="utf-8") as handle:
+    team = json.load(handle)
+role = team.get("roles", {}).get("orchestrator", {})
+disabled_providers = team.get("disabled_model_providers", [])
+if (not isinstance(disabled_providers, list)
+        or len(disabled_providers) != len(set(disabled_providers))):
+    raise SystemExit("herdr-team: invalid disabled_model_providers")
+pairs = [
+    (runtime, model)
+    for runtime, models in role.get("models", {}).items()
+    for model in models
+]
+if requested_model == "auto":
+    raise SystemExit("herdr-team: --model must be an exact allowlisted model, not auto")
+provider = requested_model.split("/", 1)[0] if "/" in requested_model else None
+if provider in disabled_providers:
+    raise SystemExit(f"herdr-team: model provider is disabled: {provider}")
+if not any(
+    model == requested_model and requested_runtime in {"auto", runtime}
+    for runtime, model in pairs
+):
+    raise SystemExit(
+        f"herdr-team: model is not allowed for Orchestrator/{requested_runtime}: {requested_model}"
+    )
+PY
+}
+
+check_harness
+validate_orchestrator_model
+
+finish_external_session() {
+  local client_status="$1"
+  local server_status
+
+  if [ ! -f "$SHUTDOWN_MARKER" ]; then
+    return "$client_status"
+  fi
+
+  server_status="$(herdr status server 2>/dev/null || true)"
+  if [[ "$server_status" == *"status: running"* ]]; then
+    echo "herdr-team: detached shutdown finalizer exited without stopping Herdr" >&2
+    return 1
+  fi
+  rm -f "$SHUTDOWN_MARKER"
+  return 0
+}
+
+shutdown_signal_has_reader() {
+  [ -p "$SHUTDOWN_SIGNAL" ] || return 1
+  python3 - "$SHUTDOWN_SIGNAL" <<'PY'
+import os
+import sys
+
+try:
+    descriptor = os.open(sys.argv[1], os.O_WRONLY | os.O_NONBLOCK)
+except OSError:
+    raise SystemExit(1)
+else:
+    os.close(descriptor)
+PY
+}
+
+shutdown_finalizer_pid_alive() {
+  local finalizer_pid
+
+  [ -f "$SHUTDOWN_FINALIZER_LOCK/pid" ] || return 1
+  finalizer_pid="$(cat "$SHUTDOWN_FINALIZER_LOCK/pid")"
+  case "$finalizer_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$finalizer_pid" 2>/dev/null
+}
+
+remove_stale_shutdown_finalizer() {
+  rm -f "$SHUTDOWN_SIGNAL"
+  rm -f "$SHUTDOWN_FINALIZER_LOCK/pid"
+  rmdir "$SHUTDOWN_FINALIZER_LOCK" 2>/dev/null || true
+}
+
+start_shutdown_finalizer() {
+  mkdir -p "$SHUTDOWN_STATE_DIR"
+
+  if shutdown_finalizer_pid_alive && shutdown_signal_has_reader; then
+    export HERDR_SHUTDOWN_SIGNAL="$SHUTDOWN_SIGNAL"
+    return 0
+  fi
+
+  if shutdown_finalizer_pid_alive; then
+    echo "herdr-team: shutdown finalizer is alive but not ready" >&2
+    return 1
+  fi
+
+  remove_stale_shutdown_finalizer
+  if ! mkdir "$SHUTDOWN_FINALIZER_LOCK" 2>/dev/null; then
+    echo "herdr-team: unable to claim shutdown finalizer state" >&2
+    return 1
+  fi
+
+  if ! mkfifo "$SHUTDOWN_SIGNAL"; then
+    rmdir "$SHUTDOWN_FINALIZER_LOCK" 2>/dev/null || true
+    return 1
+  fi
+
+  HERDR_SHUTDOWN_SIGNAL_PATH="$SHUTDOWN_SIGNAL" \
+    HERDR_SHUTDOWN_MARKER_PATH="$SHUTDOWN_MARKER" \
+    HERDR_SHUTDOWN_FINALIZER_LOCK_PATH="$SHUTDOWN_FINALIZER_LOCK" \
+    nohup "$SCRIPT_DIR/herdr-team" shutdown-finalizer \
+      --session "$SESSION" >"$SHUTDOWN_FINALIZER_LOG" 2>&1 < /dev/null &
+  printf '%s\n' "$!" > "$SHUTDOWN_FINALIZER_LOCK/pid"
+  export HERDR_SHUTDOWN_SIGNAL="$SHUTDOWN_SIGNAL"
+}
+
+if [ "$COMMAND" = "check" ]; then
+  exit 0
+fi
+
+if [ "${HERDR_ENV:-}" != "1" ]; then
+  export HERDR_SESSION="$SESSION"
+  if ! start_shutdown_finalizer; then
+    echo "herdr-team: unable to start detached shutdown finalizer" >&2
+    exit 1
+  fi
+
+  bootstrap=(
+    "$SCRIPT_DIR/herdr-team"
+    start
+    --runtime "$RUNTIME"
+    --cwd "$CWD"
+    --registry "$REGISTRY"
+    --vault-path "$VAULT_PATH"
+    --activity-log "$ACTIVITY_LOG"
+    --session "$SESSION"
+    --voice "$VOICE_MODE"
+  )
+  if [ -n "$MODEL" ]; then
+    bootstrap+=(--model "$MODEL")
+  fi
+  SERVER_STATUS="$(herdr status server 2>/dev/null || true)"
+  if [[ "$SERVER_STATUS" == *"status: running"* ]]; then
+    if ! herdr agent get orchestrator >/dev/null 2>&1; then
+      echo "Starting global Orchestrator in Herdr session: $SESSION"
+      herdr agent start orchestrator --cwd "$CWD" --focus \
+        -- "${bootstrap[@]}" >/dev/null
+    else
+      if [ -n "$MODEL" ]; then
+        echo "herdr-team: an Orchestrator is already running; model selection applies only when starting a new Orchestrator" >&2
+        exit 2
+      fi
+      if [ "$VOICE_EXPLICIT" = 1 ]; then
+        echo "herdr-team: an Orchestrator is already running; voice selection applies only when starting a new Orchestrator" >&2
+        exit 2
+      fi
+      herdr agent focus orchestrator >/dev/null
+    fi
+    set +e
+    herdr --session "$SESSION"
+    CLIENT_STATUS=$?
+    set -e
+    finish_external_session "$CLIENT_STATUS"
+    exit $?
+  fi
+
+  BOOTSTRAP_CLAIM="$SHUTDOWN_STATE_DIR/$SESSION_TOKEN.bootstrap-claimed"
+  mkdir -p "$SHUTDOWN_STATE_DIR"
+  rmdir "$BOOTSTRAP_CLAIM" 2>/dev/null || true
+
+  export HERDR_TEAM_RUNTIME="$RUNTIME"
+  export HERDR_TEAM_MODEL="$MODEL"
+  export HERDR_TEAM_CWD="$CWD"
+  export HERDR_TEAM_REGISTRY="$REGISTRY"
+  export HERDR_TEAM_VAULT_PATH="$VAULT_PATH"
+  export HERDR_TEAM_ACTIVITY_LOG="$ACTIVITY_LOG"
+  export HERDR_TEAM_SESSION="$SESSION"
+  export HERDR_TEAM_ORIGINAL_SHELL="${SHELL:-/bin/sh}"
+  export HERDR_TEAM_BOOTSTRAP_CLAIM="$BOOTSTRAP_CLAIM"
+  export SHELL="$SCRIPT_DIR/herdr-team"
+
+  echo "Opening Herdr session $SESSION and starting global Orchestrator"
+  set +e
+  herdr --session "$SESSION"
+  CLIENT_STATUS=$?
+  set -e
+  finish_external_session "$CLIENT_STATUS"
+  exit $?
+fi
+
+if [ -z "${HERDR_PANE_ID:-}" ]; then
+  echo "herdr-team: HERDR_PANE_ID is missing from the Herdr pane environment" >&2
+  exit 1
+fi
+
+herdr pane rename "$HERDR_PANE_ID" orchestrator
+
+mkdir -p "$SHUTDOWN_STATE_DIR"
+HERDR_SHUTDOWN_MARKER="$SHUTDOWN_MARKER"
+rm -f "$HERDR_SHUTDOWN_MARKER"
+export HERDR_SHUTDOWN_MARKER
+
+INITIAL_PROMPT="$(cat <<'EOF'
+Begin the global Orchestrator startup handshake now. Your entire Human-facing response must be in Thai and use a feminine speaking style. Begin exactly with this sentence: สวัสดีค่ะ ดิฉันคือ Orchestrator พร้อมช่วยคุณจัดการงานหลายโปรเจกต์ค่ะ
+
+Use this greeting only for the startup handshake. Do not repeat it in later
+Human-facing replies or voice summaries.
+
+For the startup handshake, keep the greeting on line 1. On line 2, put exactly
+one concise voice-ready outcome sentence, replacing {N} with the registry count:
+ตรวจสอบ Workspace Registry เรียบร้อยแล้วค่ะ พบ {N} โปรเจกต์ กรุณาเลือกโปรเจกต์ที่ต้องการเปิดค่ะ
+Then leave one blank line and present the full registered-project details below it.
+
+Read the canonical workspace registry path appended at the end of this startup request.
+The startup footer supplies the configured vault root and OKF activity-log
+paths.
+
+The vault is the shared knowledge store. Do not scan it broadly or read unrelated
+notes. For normal tasks, PM must delegate one concise Markdown journal entry to
+Documenter using the exact OKF activity-log path above in `Allowed files`.
+An approved deterministic-micro task is audited by its immutable Task Board
+event and candidate artifact and must not wait for a separate journal round;
+include it in the next normal OKF batch.
+Orchestrator is read-only and must never write the vault directly.
+For a Human-confirmed internal knowledge query, PM may launch Investigator as
+`Task class: investigation` with `--knowledge-source vault` and one explicit
+`--vault-read-scope` below the configured root. The task must include a bounded
+query, exclusions, result limit, and path-plus-excerpt evidence. A missing,
+root-wide, unreadable, or escaping scope is `[STUCK]`; a requested note write
+is a separate Documenter task with exact `Allowed files`.
+
+Present the registered project names, descriptions, and statuses using Thai prose. Ask in Thai which project the Human wants, or whether to start new-project provisioning. Preserve the registry display name and path, but convert its Herdr runtime slug to lowercase snake_case; for example, ap-bootcamp becomes ap_bootcamp. Stop and ask if normalization creates a collision. After the Human selects a project, validate only its registry entry and registered paths. Do not inspect Git, commits, project TODO/diary files, source files, or the vault. PM owns project discovery, task classification, and scope confirmation after handoff.
+
+Use English for every message exchanged with PM or any other agent, including tasks, plans, handoffs, status, findings, and evidence. Preserve code, commands, paths, identifiers, and quoted source text in their original form.
+
+For every completed Human-facing response after startup, put one short, complete
+Thai outcome sentence on the first line (preferably no more than 120 characters),
+then leave one blank line and keep the full explanation and evidence below it.
+That voice-ready outcome must say what was completed or what the current state is.
+If the Human must act, append the specific next action in the same
+short line, beginning with `กรุณา` or `โปรด`; if no Human action is needed, do
+not invent one. Write that line as plain speech without Markdown, bullets, code
+formatting, links, emoji, or decorative symbols such as asterisks. Keep the
+complete voice-ready line within 160 characters.
+Use feminine Thai pronouns and endings such as ดิฉัน/ฉัน and ค่ะ/คะ; do not use ผม or ครับ. Do not put a greeting on later result lines. The optional voice
+summary speaks only the startup outcome line or later result line and must not
+replace the full UI explanation.
+
+Human project selection is the bootstrap gate. Treat selection as a hard state change: validate only the selected registry entry and registered paths, create or reuse the project workspace and `manager-{project}` tab, launch `pm-{project}`, and send one English bootstrap brief. The brief contains the canonical project identity, registered paths, configured vault/activity-log paths, any verbatim Human request summary, and an Orchestrator reply pane used only for readiness [ACK] or startup [STUCK]. Do not inspect Git, project source, TODO/diary files, or the vault; do not confirm scope, classify the task, approve plans, run checks, commit, push, manage a PR, or replace a missing PM. PM owns project discovery and execution. If bootstrap fails, report [STUCK] to the Human.
+
+Before launching PM, score the PM bootstrap assignment with the five-dimension Task Tier Assessment rubric and record a Model Selection block with Role, Runtime, Model, Routing, and Reason. Pass the exact tier and pair to spawn-agent with --task-tier, --runtime, and --model. Use --routing-exception only for a configured alternate with a recorded reason. Never use auto, normalize or substitute an identifier, switch the active pair later, or ask for a separate model approval. This assessment covers PM bootstrap complexity; PM separately assesses child assignments after direct Human scope confirmation.
+
+After PM acknowledges readiness, tell the Human in Thai to continue in the exact `pm-{project}` pane, then stop the turn. PM is the primary Human-facing controller for that project. Routine plans, status, authorization gates, and completion stay between Human and PM and must not be relayed through Orchestrator. The Human supplies `AUTO_COMMIT` with the approved scope when desired, then `APPROVE_COMMIT`, `APPROVE_PUSH`, and `APPROVE_PR_DEV` directly in the PM pane; PM validates and routes them through its internal controller chain. Orchestrator remains available on demand only for registry/harness lifecycle, new-project provisioning, opening or recovering PMs, global status, explicit cross-project coordination, and shutdown.
+
+Do not remain in working state while waiting for PM readiness or future Human input. Do not poll, drain, optimize, edit, reorder, or answer all queued Human messages. Handle the current bootstrap or explicit cross-project request and stop the turn.
+
+Treat the Human-facing Pi command '/shutdown' (or the standalone compatibility form 'shutdown') as an explicit request to stop this agent-team session. Reply briefly in Thai that shutdown is starting, then run agent-team-shutdown, passing --workspace ID once for each active project workspace that you created or reused. Never pass the global Orchestrator workspace or an unrelated workspace. The helper closes those project workspaces and completes a nonblocking handoff to the detached external finalizer. The finalizer queues /quit, applies the Enter safeguard, and runs herdr server stop as its final command outside this pane. Do not claim shutdown completed unless the helper handoff and finalizer succeed; on failure report [STUCK] with the real error.
+EOF
+)"
+INITIAL_PROMPT="$INITIAL_PROMPT
+
+Canonical workspace registry: $REGISTRY
+Vault root: $VAULT_PATH
+OKF activity log: $ACTIVITY_LOG"
+
+launch=(
+  "$RUNTIME_BIN"
+  --role orchestrator
+  --runtime "$RUNTIME"
+  --label orchestrator
+  --cwd "$CWD"
+  --initial-prompt "$INITIAL_PROMPT"
+)
+if [ -n "$MODEL" ]; then
+  launch+=(--model "$MODEL")
+fi
+echo "Starting global Orchestrator"
+set +e
+"${launch[@]}"
+RUNTIME_STATUS=$?
+set -e
+
+if [ -f "$HERDR_SHUTDOWN_MARKER" ]; then
+  echo "Orchestrator runtime exited; outer launcher will finish shutdown"
+  exit 0
+fi
+
+exit "$RUNTIME_STATUS"

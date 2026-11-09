@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Close a whole hteam session in the Herdr app runtime.
+#
+# Closing the project tabs left the Orchestrator pane behind: the launcher brief
+# only taught the app protocol to kill team terminals and explicitly never to
+# touch itself, so the Human had to close the last pane by hand. This closes
+# every other live terminal first, then this pane, and only stops the app-side
+# core when asked.
+#
+# Confirmation is the Human's, not this helper's: the Orchestrator asks once in
+# Thai and runs this only after a yes.
+
+set -euo pipefail
+
+SELF="${HC_TERMINAL_ID:-}"
+KEEP_SELF=0
+SERVER_STOP=0
+DRY_RUN=0
+
+usage() {
+  cat <<'EOF'
+Usage: hteam-shutdown [--keep-orchestrator] [--server-stop] [--dry-run]
+
+Close every live terminal in the current hteam session, then this pane last.
+  --keep-orchestrator  leave this pane open (team only)
+  --server-stop        also run `hc server stop` after the panes are gone
+  --dry-run            print the plan, kill nothing
+
+Refuses to run outside an agent pane unless --force is given.
+EOF
+}
+
+FORCE=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --keep-orchestrator) KEEP_SELF=1 ;;
+    --server-stop) SERVER_STOP=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --force) FORCE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "hteam-shutdown: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+HC_BIN="${HC_BIN:-$(command -v hc || true)}"
+[ -n "$HC_BIN" ] || { echo "hteam-shutdown: hc not found" >&2; exit 1; }
+
+if [ "$FORCE" != "1" ] && [ -z "$SELF" ]; then
+  echo "hteam-shutdown: HC_TERMINAL_ID is not set; run inside an agent pane or pass --force" >&2
+  exit 1
+fi
+
+if [ "$FORCE" != "1" ]; then
+  ROLE="${HERDR_AGENT_ROLE:-${HERDR_ROLE:-}}"
+  if [ -n "$ROLE" ] && [ "$ROLE" != "orchestrator" ]; then
+    echo "hteam-shutdown: only the Orchestrator may close the session (role=$ROLE)" >&2
+    exit 1
+  fi
+fi
+
+PLAN="$("$HC_BIN" ls | python3 -c '
+import json, os, sys
+
+self_id = os.environ.get("HC_TERMINAL_ID", "")
+data = json.load(sys.stdin)
+targets = []
+for terminal in data.get("terminals", []):
+    address = terminal.get("address", "")
+    if not address:
+        continue
+    if terminal.get("state") != "live":
+        continue
+    if address == self_id:
+        continue
+    targets.append(address)
+print("\n".join(targets))
+')"
+
+if [ "$DRY_RUN" = "1" ]; then
+  printf 'hteam-shutdown: would close: %s\n' "${PLAN//$'\n'/ }"
+  [ "$KEEP_SELF" = "1" ] || echo "hteam-shutdown: would close this pane last: ${SELF:-<none>}"
+  [ "$SERVER_STOP" = "1" ] && echo "hteam-shutdown: would stop the app-side core"
+  exit 0
+fi
+
+closed=0
+while IFS= read -r terminal; do
+  [ -n "$terminal" ] || continue
+  "$HC_BIN" kill "$terminal" >/dev/null 2>&1 || {
+    echo "hteam-shutdown: could not close $terminal" >&2
+    exit 1
+  }
+  printf 'hteam-shutdown: closed %s\n' "$terminal"
+  closed=$((closed + 1))
+done <<< "$PLAN"
+
+printf 'hteam-shutdown: closed %d team terminal(s)\n' "$closed"
+
+if [ "$KEEP_SELF" != "1" ] && [ -n "$SELF" ]; then
+  # Release the voice file: a killed pane cannot do it itself, and the next
+  # session would otherwise inherit a dead owner and stay silent.
+  VOICE_BIN="${HERDR_VOICE_NOTIFY_BIN:-$HOME/bin/voice-notify}"
+  if [ -x "$VOICE_BIN" ]; then
+    HERDR_VOICE_NOTIFY=1 "$VOICE_BIN" release >/dev/null 2>&1 || true
+  fi
+  # Detached so the kill lands after this shell has returned its output; a
+  # blocking wait here would be killed by its own hangup.
+  ( sleep 0.6; "$HC_BIN" kill "$SELF" >/dev/null 2>&1 ) >/dev/null 2>&1 &
+  printf 'hteam-shutdown: closing this pane last: %s\n' "$SELF"
+fi
+
+if [ "$SERVER_STOP" = "1" ]; then
+  "$HC_BIN" server stop >/dev/null 2>&1 || {
+    echo "hteam-shutdown: server stop failed" >&2
+    exit 1
+  }
+  echo "hteam-shutdown: app-side core stopped"
+fi

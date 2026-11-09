@@ -1,0 +1,342 @@
+#!/usr/bin/env bash
+#
+# herdr-app-team — start the agent-team Orchestrator inside the Herdr desktop
+# app (herdr-app window + herdr-core `hc` terminals). Short alias: `hteam`.
+#
+# Why this exists: the desktop app is a different runtime from the `herdr` TUI.
+# The TUI owns sessions/workspaces/panes and speaks `herdr pane run`; the app
+# owns spaces/tabs/terminals in herdr-core and speaks `hc send|read|run` plus
+# `herdr-app do ...`. Neither sees the other's state, so a team started by
+# `herdr-team` never appears in the app window. This launcher drives the app's
+# own primitives and reuses the repo role files, model allowlist and
+# bin/agent-runtime, so role text and policy stay single-sourced.
+#
+# Usage:
+#   herdr-app-team                 start (or report) the Orchestrator in the app
+#   herdr-app-team check           validate prerequisites only
+#   herdr-app-team --watch on|off  start the ClickUp intake watcher in its own tab
+#                                  (default off). `--no-watch` is a legacy alias
+#                                  for `--watch off`.
+#   herdr-app-team --space NAME    control space name (default: Herdr Team)
+#   herdr-app-team --folder PATH   where team terminals start (default ~/Workspaces)
+#   herdr-app-team --voice on|off  speak short Thai status from the orchestrator and
+#                                  PM (default off). Needs bin/tts-thai.sh and either
+#                                  needs a gtts-cli binary and network.
+#                                  Workers and verifiers never speak.
+#
+# Starting does not launch the ClickUp intake watcher (bin/clickup-watch) by
+# default: pass --watch on (or HERDR_TEAM_WATCH=1) to run it in its own tab of
+# the control space.
+
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+APP="${HERDR_APP_BIN:-$(command -v herdr-app || echo "$HOME/.local/bin/herdr-app")}"
+HC="${HC_BIN:-$(command -v herdr-core || echo "$HOME/.local/bin/herdr-core")}"
+
+# Per-machine launcher config written by `/hteam setup` (or `hteam-config set`).
+# Env vars and flags still win: hteam-config only exports keys that are unset.
+CONFIG_BIN=""
+for cand in "$(command -v hteam-config 2>/dev/null || true)" \
+            "$HOME/bin/hteam-config" "$(dirname "$SELF")/hteam-config"; do
+  [ -n "$cand" ] && [ -x "$cand" ] && { CONFIG_BIN="$cand"; break; }
+done
+if [ -n "$CONFIG_BIN" ]; then
+  if ! CONFIG_ENV="$("$CONFIG_BIN" env 2>&1)"; then
+    echo "herdr-app-team: invalid launcher config: $CONFIG_ENV" >&2
+    exit 2
+  fi
+  eval "$CONFIG_ENV"
+fi
+
+CWD="${HERDR_TEAM_CWD:-$HOME/Workspaces}"
+if [ -z "${HERDR_TEAM_REPO:-}" ]; then
+  REPO=""
+  for cand in "$HOME/Workspaces/project-scaffold" "$HOME/project-scaffold" \
+              "$(cd "$(dirname "$SELF")/.." 2>/dev/null && pwd)"; do
+    [ -n "$cand" ] && [ -x "$cand/bin/agent-runtime" ] && { REPO="$cand"; break; }
+  done
+  REPO="${REPO:-$HOME/Workspaces/project-scaffold}"
+else
+  REPO="$HERDR_TEAM_REPO"
+fi
+REGISTRY="${HERDR_TEAM_REGISTRY:-$CWD/.agents/workspace-registry.yaml}"
+VAULT_PATH="${HERDR_TEAM_VAULT:-$CWD/vault}"
+ACTIVITY_LOG="${HERDR_TEAM_ACTIVITY_LOG:-$VAULT_PATH/log.md}"
+SPACE="${HERDR_TEAM_SPACE:-Herdr Team}"
+MODE="start"
+WATCH="${HERDR_TEAM_WATCH:-0}"
+VOICE="${HERDR_VOICE_MODE:-off}"
+
+die()  { echo "herdr-app-team: $*" >&2; exit 1; }
+ok()   { echo "  ok:   $*"; }
+
+usage() {
+  sed -n '3,/^$/p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    check) MODE="check"; shift ;;
+    --space) SPACE="${2:-}"; shift 2 ;;
+    --watch) WATCH="${2:-}"; shift 2 ;;
+    --no-watch) WATCH="0"; shift ;;
+    --folder) CWD="${2:-}"; shift 2 ;;
+    --voice) VOICE="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1 (try --help)" ;;
+  esac
+done
+
+case "$VOICE" in
+  on|off) ;;
+  *) die "--voice must be on or off, got '$VOICE'" ;;
+esac
+
+# --watch / HERDR_TEAM_WATCH accepts the same on|off vocabulary as --voice, plus
+# the legacy 1|0 the config file exports.
+case "$WATCH" in
+  on|1)   WATCH="1" ;;
+  off|0)  WATCH="0" ;;
+  *) die "--watch must be on or off, got '$WATCH'" ;;
+esac
+
+# ============================================================================
+# prerequisites
+# ============================================================================
+[ -x "$APP" ] || die "herdr-app not found (install Herdr.app, then open it once)"
+[ -x "$HC" ]  || die "herdr-core (hc) not found"
+[ -r "$REGISTRY" ] || die "workspace registry not readable: $REGISTRY (set HERDR_TEAM_REGISTRY)"
+command -v pi >/dev/null 2>&1 || die "pi CLI not found (this runtime drives Pi via agent-runtime)"
+[ -x "$REPO/bin/agent-runtime" ] || die "missing $REPO/bin/agent-runtime (set HERDR_TEAM_REPO)"
+[ -r "$REPO/.agents/agents/orchestrator.md" ] || die "missing role file: $REPO/.agents/agents/orchestrator.md"
+[ -r "$REPO/.agents/team.json" ] || die "missing model allowlist: $REPO/.agents/team.json"
+
+APP_STATUS="$("$APP" status 2>/dev/null || true)"
+case "$APP_STATUS" in
+  *'"error"'*|"") die "the Herdr app window is not reachable — open Herdr.app, then retry" ;;
+esac
+ok "herdr app reachable"
+
+if [ "$MODE" = "check" ]; then
+  echo "  ok:   repo: $REPO"
+  echo "  ok:   role files: $REPO/.agents/agents"
+  echo "  ok:   space target: $SPACE (folder $CWD)"
+  echo "  ok:   registry: $REGISTRY"
+  echo "  ok:   vault: $VAULT_PATH"
+  echo "  ok:   activity log: $ACTIVITY_LOG"
+  if [ -x "$HOME/bin/herdr-app-spawn-role" ]; then
+    echo "  ok:   role spawner: $HOME/bin/herdr-app-spawn-role"
+  elif [ -x "$REPO/bin/herdr-app-spawn-role" ]; then
+    echo "  ok:   role spawner: $REPO/bin/herdr-app-spawn-role"
+  else
+    echo "  MISS: role spawner (run setup_harness.sh)" >&2
+    exit 1
+  fi
+  echo "  ok:   watch: $([ "$WATCH" = "1" ] && echo on || echo off)"
+  if [ -x "$REPO/bin/clickup-watch" ]; then
+    echo "  ClickUp intake watcher:"
+    "$REPO/bin/clickup-watch" check || echo "  warn: ClickUp intake watcher is not ready (hteam still starts; polls will fail)" >&2
+  else
+    echo "  warn: ClickUp intake watcher missing: $REPO/bin/clickup-watch" >&2
+  fi
+  if [ "$VOICE" = "on" ]; then
+    if [ -x "$REPO/bin/tts-thai.sh" ]; then
+      echo "  ok:   voice: on (tts: $REPO/bin/tts-thai.sh — gTTS only)"
+    else
+      echo "  warn: voice is on but $REPO/bin/tts-thai.sh is missing; speech falls back to macOS say" >&2
+    fi
+  else
+    echo "  ok:   voice: off"
+  fi
+  echo "herdr-app-team: check passed"
+  exit 0
+fi
+
+# ============================================================================
+# helpers
+# ============================================================================
+space_id_by_name() {
+  "$APP" ls 2>/dev/null | python3 -c '
+import json,sys
+name=sys.argv[1]
+try: data=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for sp in data.get("spaces") or []:
+    if (sp.get("name") or "") == name:
+        print(sp["id"]); break
+' "$1"
+}
+
+live_team_tabs() {
+  "$HC" ls 2>/dev/null | python3 -c '
+import json,sys
+want=sys.argv[1]
+try: data=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for t in data.get("terminals") or []:
+    where=(t.get("labels") or {}).get("where") or t.get("where") or ""
+    if where.startswith(want + " /"):
+        print(t["address"] + "\t" + where)
+' "$1"
+}
+
+argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
+
+slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/_/g; s/^_//; s/_$//'; }
+
+# ============================================================================
+# ClickUp intake watcher
+# ============================================================================
+# The watcher lives with the team: it starts with `hteam` and dies with it.
+# It is a plain loop in its own Herdr tab, not an agent, so a poll costs no
+# model tokens. It is off unless asked for: --watch on or HERDR_TEAM_WATCH=1.
+WATCHER="$REPO/bin/clickup-watch"
+
+start_watcher() {
+  if [ "$WATCH" != "1" ]; then
+    echo "  skip: ClickUp intake watcher off (enable with --watch on / HERDR_TEAM_WATCH=1)"
+    return 0
+  fi
+  if [ ! -x "$WATCHER" ]; then
+    echo "  skip: ClickUp intake watcher not installed ($WATCHER)" >&2
+    return 0
+  fi
+  if "$WATCHER" start; then
+    ok "ClickUp intake watcher running in space '$SPACE'"
+  else
+    echo "  warn: ClickUp intake watcher did not start — run: $WATCHER status" >&2
+  fi
+}
+
+# ============================================================================
+# state + brief
+# ============================================================================
+STATE_DIR="${HERDR_TEAM_STATE_DIR:-$HOME/.local/state/herdr-app-team/$(slugify "$SPACE")}"
+mkdir -p "$STATE_DIR"
+BRIEF="$STATE_DIR/orchestrator-brief.md"
+REGISTRY_COUNT="$(grep -c '^  - name:' "$REGISTRY" 2>/dev/null || echo 0)"
+
+# Where a spawned role gets its spawner from: the installed one when present,
+# otherwise this checkout (so a fresh machine works before setup_harness.sh).
+if [ -x "$HOME/bin/herdr-app-spawn-role" ]; then
+  SPAWN="$HOME/bin/herdr-app-spawn-role"
+else
+  SPAWN="$REPO/bin/herdr-app-spawn-role"
+fi
+
+read -r -d '' BRIEF_BODY <<EOF || true
+You are the global Orchestrator of the Herdr desktop-app runtime. Your role
+text is your SOUL; follow it. This runtime uses herdr-core terminals and the
+Herdr app window, NOT the herdr TUI.
+
+Open your first Human-facing reply with exactly this Thai greeting on line 1:
+
+สวัสดีค่ะ ดิฉันคือ Orchestrator ทีมเอเจนต์ พร้อมเริ่มงานให้คุณลูกค้าค่ะ
+
+On line 2 put exactly one voice-ready sentence, replacing {N} with the
+registry count (${REGISTRY_COUNT}):
+
+ตรวจสอบ Workspace Registry เรียบร้อยแล้วค่ะ พบ {N} โปรเจกต์ กรุณาเลือกโปรเจกต์และประเภทงานที่ต้องการดำเนินการค่ะ
+
+Then one blank line, then list every registered project (display name, runtime
+slug in lowercase snake_case, and path) in Thai, and ask in Thai which project
+the Human wants and whether it is: continue recent work, fix a bug, add a
+feature, or start a new project. Do not inspect unselected projects.
+
+Runtime transport (this replaces the herdr TUI commands in your role text):
+- You run in Herdr space "${SPACE}". Your terminal id is \$HC_TERMINAL_ID.
+- Start a role inside its project team:
+    ${SPAWN} <role> <brief-file> --project <slug> [--workstream <name>]
+  ALWAYS pass --project, including for pm. It creates or reuses that project's
+  OWN app space named after the slug, so a newly opened project never lands in
+  this control space (${SPACE}). Never pass --space for a project role: the
+  launcher refuses it, because --space is how a project pane gets mixed into
+  another project's space.
+  The project gets its own app space and the roles share one tab per group:
+  manager-{project} (PM, Supervisor), planner-{project} (SA, Investigator,
+  Researcher, Designer), worker-{project}[-workstream] (Coder, Refactor),
+  verifier-{project} (Reviewer, Tester), doc-{project} (Documenter). At most
+  three panes per tab; a fourth role opens another tab of the same name. It
+  prints JSON with the tab and terminal id. Roles: pm, supervisor, sa,
+  investigator, researcher, designer, coder, refactor, reviewer, tester,
+  documenter.
+- Message an agent:   $HC send <terminal-id> "<short message>"
+- Read an agent:      $HC read <terminal-id> --lines 200
+- List terminals:     $HC ls
+- Blocking waits are forbidden; coordination stays push-based. Keep each tab
+  to at most three panes. Write assignments longer than ten lines to a file and
+  send the path.
+- Never call the \`herdr\` binary: that is the other runtime and cannot see you.
+
+Policy: read-only role (no file edits, no commits, no pushes, no PRs). After
+the Human confirms scope, your next action is delegation to PM — do not do the
+project work yourself. Report [STUCK] in Thai if delegation fails.
+
+Shutdown: when the Human asks to stop the team, ask once in Thai whether this
+Orchestrator pane should close too, then run:
+  hteam-shutdown                (closes every other pane, then this one last)
+  hteam-shutdown --keep-orchestrator   (leaves this pane open)
+  hteam-shutdown --server-stop         (only when the Human wants a full stop)
+One confirmation is enough: after the Human says yes, do not ask again. Never
+stop the Herdr desktop app itself.
+
+Canonical workspace registry: ${REGISTRY}
+Vault root: ${VAULT_PATH}
+OKF activity log: ${ACTIVITY_LOG}
+EOF
+printf '%s\n' "$BRIEF_BODY" > "$BRIEF"
+ok "brief written: $BRIEF"
+
+# ============================================================================
+# space + orchestrator tab
+# ============================================================================
+EXISTING="$(live_team_tabs "$SPACE" | awk -F'\t' '$2 ~ /\/ orchestrator$/' || true)"
+if [ -n "$EXISTING" ]; then
+  echo "herdr-app-team: the Orchestrator is already live in space '$SPACE':"
+  echo "$EXISTING" | sed 's/^/  /'
+  echo "Talk to it with: $HC send <terminal-id> \"...\""
+  start_watcher
+  exit 0
+fi
+
+SPACE_ID="$(space_id_by_name "$SPACE")"
+
+# The app window is agent-agnostic: a tab runs any argv and herdr-core detects
+# the agent inside it. Repo policy fixes the Orchestrator to Pi, so we start it
+# through bin/agent-runtime with the allowlisted model for this role.
+PI_MODEL="$(python3 - "$REPO/.agents/team.json" <<'PY'
+import json, sys
+try:
+    roles = json.load(open(sys.argv[1]))["roles"]
+    print(roles["orchestrator"]["models"]["pi"][0])
+except Exception:
+    print("antigravity/gemini-3.8-flash")
+PY
+)"
+ARGV="$(argv_json env HERDR_ENV=1 "HERDR_VOICE_MODE=$VOICE" \
+          "$REPO/bin/agent-runtime" \
+          --role orchestrator --runtime pi --label orchestrator \
+          --model "$PI_MODEL" --cwd "$CWD" \
+          --initial-prompt "$(cat "$BRIEF")")"
+
+if [ -n "$SPACE_ID" ]; then
+  RESULT="$("$APP" do tab.new --space "$SPACE_ID" --name orchestrator --argv "$ARGV" 2>&1)"
+else
+  RESULT="$("$APP" do space.new --name "$SPACE" --folder "$CWD" --tab orchestrator \
+            --argv "$ARGV" 2>&1)"
+fi
+
+TERMINAL="$(printf '%s' "$RESULT" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+print(d.get("terminal") or "")
+')"
+[ -n "$TERMINAL" ] || die "the app did not create the Orchestrator terminal: $RESULT"
+
+printf '%s\n' "$RESULT" | sed 's/^/  /'
+echo "herdr-app-team: Orchestrator started in space '$SPACE' (terminal $TERMINAL)"
+echo "  talk to it:  $HC send $TERMINAL \"...\""
+echo "  read it:     $HC read $TERMINAL --lines 200"
+start_watcher
+exit 0

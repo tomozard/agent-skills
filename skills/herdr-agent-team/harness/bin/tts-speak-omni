@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""One TTS adapter for every path: Hermes replies, hteam, herdr-team.
+
+VoiceStudio's OmniVoice with the Thai-native profile the Human picked, spoken at
+0.9 speed and passed through a light PA chain (band-pass, short cabin reverb,
+loudness), because that is the timbre he approved.
+
+Usage
+  tts-speak-omni "<text>" [output.mp3]
+      with an output path: write the file
+      without one:         play it (afplay, detached)
+
+What it fixes before synthesis (the three defects that made earlier output
+unintelligible):
+  - markdown, code fences, URLs, file paths, hashes and emoji are stripped;
+  - Arabic digits become Thai words, because the engine reads "28" as noise;
+  - English loanwords go through thai-accent (~/.config/herdr/thai-accent.tsv).
+
+Env: VS_URL, TTS_OMNI_VOICE (default c3141426), TTS_OMNI_SPEED (0.9),
+     TTS_OMNI_FILTER=0 to skip the PA chain, TTS_OMNI_CACHE, TTS_OMNI_NO_PLAY=1
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+
+URL = os.environ.get("VS_URL", "http://127.0.0.1:3900")
+VOICE = os.environ.get("TTS_OMNI_VOICE", "c3141426")
+SPEED = os.environ.get("TTS_OMNI_SPEED", "0.9")
+# The light chain the Human approved: no cabin reverb, wide band, gentle
+# compression. The earlier PA chain (highpass 250 / lowpass 4.2k / 14 ms echo)
+# narrowed the voice until the high end felt harsh on the secretary profile.
+FILTER = os.environ.get(
+    "TTS_OMNI_FILTER",
+    "highpass=f=120,lowpass=f=7500,"
+    "acompressor=threshold=-20dB:ratio=2.5,"
+    "loudnorm=I=-16:TP=-1.5:LRA=11,alimiter=limit=0.95",
+)
+CACHE = Path(os.environ.get("TTS_OMNI_CACHE", Path.home() / ".cache" / "tts-omni"))
+ACCENT = Path.home() / "bin" / "thai-accent"
+MAX_CHARS = int(os.environ.get("TTS_OMNI_MAX_CHARS", "240"))
+
+DIGITS = ["ศูนย์", "หนึ่ง", "สอง", "สาม", "สี่", "ห้า", "หก", "เจ็ด", "แปด", "เก้า"]
+
+
+def thai_number(value: int) -> str:
+    if value == 0:
+        return DIGITS[0]
+    if value < 10:
+        return DIGITS[value]
+    if value < 100:
+        tens, ones = divmod(value, 10)
+        head = "" if tens == 1 else DIGITS[tens]
+        return head + "สิบ" + ("" if ones == 0 else ("เอ็ด" if ones == 1 else DIGITS[ones]))
+    if value < 1000:
+        hundreds, rest = divmod(value, 100)
+        out = DIGITS[hundreds] + "ร้อย"
+        return out + thai_number(rest) if rest else out
+    if value < 10000:
+        thousands, rest = divmod(value, 1000)
+        out = DIGITS[thousands] + "พัน"
+        return out + thai_number(rest) if rest else out
+    return str(value)
+
+
+def speakable(text: str) -> str:
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    text = re.sub(r"`[^`]*`", " ", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"[~/][\w./-]{3,}", " ", text)          # paths
+    text = re.sub(r"\b[0-9a-f]{7,64}\b", " ", text)      # hashes/ids
+    text = re.sub(r"[*\\(\\)\\[\\]{}<>|#>~^_=+]+", " ", text)
+    text = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", " ", text)
+    text = re.sub(r"\d+", lambda m: thai_number(int(m.group(0))), text)
+    text = re.sub(r"\s+", " ", text).strip(" -–—:;,")
+    if len(text) > MAX_CHARS:
+        cut = text[:MAX_CHARS]
+        text = cut[: cut.rfind(" ")] if " " in cut else cut
+    return text
+
+
+def accent(text: str) -> str:
+    if os.environ.get("TTS_THAI_ACCENT", "1") != "1":
+        return text
+    if not ACCACE_READY():
+        return text
+    try:
+        done = subprocess.run([str(ACCENT)], input=text, capture_output=True,
+                              text=True, timeout=20)
+        return done.stdout.strip() or text
+    except Exception:
+        return text
+
+
+def ACCACE_READY() -> bool:  # noqa: N802 - kept local and obvious
+    return ACCENT.is_file() and os.access(ACCENT, os.X_OK)
+
+
+def synth(text: str, out: Path) -> bool:
+    body = json.dumps({
+        "model": "omnivoice", "voice": VOICE, "input": text,
+        "language": "th", "response_format": "mp3", "speed": float(SPEED),
+    }).encode()
+    request = urllib.request.Request(f"{URL}/v1/audio/speech", body,
+                                     {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=240) as resp:
+            audio = resp.read()
+    except Exception as error:
+        print(f"tts-speak-omni: synthesis failed: {error}", file=sys.stderr)
+        return False
+    if len(audio) < 1000:
+        print("tts-speak-omni: empty audio", file=sys.stderr)
+        return False
+    raw = out.with_suffix(".raw.mp3")
+    raw.write_bytes(audio)
+    if FILTER:
+        done = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(raw),
+             "-filter_complex", f"[0:a]{FILTER}[out]", "-map", "[out]", str(out)],
+            capture_output=True, text=True)
+        if done.returncode != 0:
+            shutil.move(str(raw), str(out))
+        else:
+            raw.unlink(missing_ok=True)
+    else:
+        shutil.move(str(raw), str(out))
+    return out.is_file() and out.stat().st_size > 1000
+
+
+def play(path: Path) -> None:
+    if os.environ.get("TTS_OMNI_NO_PLAY") == "1":
+        return
+    subprocess.Popen(["/usr/bin/afplay", str(path)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def main() -> int:
+    text = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
+    target = Path(sys.argv[2]).expanduser() if len(sys.argv) > 2 else None
+    cleaned = speakable(text or "")
+    if not cleaned:
+        return 0
+    cleaned = accent(cleaned)
+    key = hashlib.sha256(f"{VOICE}|{SPEED}|{FILTER}|{cleaned}".encode()).hexdigest()[:16]
+    CACHE.mkdir(parents=True, exist_ok=True)
+    cached = CACHE / f"{key}.mp3"
+    if not cached.is_file():
+        if not synth(cleaned, cached):
+            return 1
+    if target:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(cached, target)
+    else:
+        play(cached)
+    if os.environ.get("TTS_OMNI_VERBOSE") == "1":
+        print(f"tts-speak-omni: voice={VOICE} speed={SPEED} chars={len(cleaned)} file={cached}",
+              file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

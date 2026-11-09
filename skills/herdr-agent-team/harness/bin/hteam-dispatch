@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""One-call dispatch for the app team: PM delegates like it calls a tool.
+
+Writing an intake JSON by hand, scoring it by eye, then calling the spawner in
+three separate steps is why a PM drifts into doing the work itself — one call is
+cheaper than four. This wrapper collapses the chain:
+
+    request + risk + brief  ->  intake  ->  workflow-shape  ->  herdr-app-spawn-role
+
+It refuses to guess: the resolver decides the shape and the tier, the spawner
+decides the runtime and the model, and a role the resolved shape does not staff
+is a hard error that names the roles the shape does allow.
+
+Usage
+  hteam-dispatch <role> --brief FILE --request TEXT --risk low|medium|high
+                        [--task-class CLASS] [--project SLUG] [--workstream W]
+                        [--place child|tab|auto] [--commit-mode manual|auto]
+                        [--controller TID] [--cwd DIR] [--dry-run] [--json]
+
+  hteam-dispatch --explain --request TEXT --risk low|medium|high [--task-class CLASS]
+
+Exit codes: 0 ok, 2 bad arguments, 3 resolver or spawner refused.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+RISKS = ("low", "medium", "high")
+CLASSES = (
+    "advisory", "document", "operational", "delivery",
+    "investigation", "bug-fix", "feature", "refactor",
+)
+
+
+def die(message: str, code: int = 2) -> "None":
+    print(f"hteam-dispatch: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def state_dir() -> Path:
+    base = os.environ.get("HERDR_TEAM_STATE_DIR")
+    if base:
+        return Path(base).expanduser()
+    return Path.home() / ".local" / "state" / "herdr-app-team"
+
+
+def find_bin(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    # The agent-skills scripts are the fallback: on a clean install nothing is on
+    # PATH yet, and setup_harness.sh runs its tests before it copies ~/bin.
+    scripts = os.environ.get(
+        "HERDR_AGENT_TEAM_SCRIPTS",
+        str(Path.home() / ".agents" / "skills" / "herdr-agent-team" / "scripts"),
+    )
+    for candidate in (Path.home() / "bin" / name, Path(scripts).expanduser() / name):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return ""
+
+
+def slug(text: str) -> str:
+    keep = [ch.lower() if ch.isalnum() else "-" for ch in text]
+    out = "".join(keep).strip("-")
+    while "--" in out:
+        out = out.replace("--", "-")
+    return (out[:40] or "task").strip("-")
+
+
+def build_intake(args, task_id: str) -> dict:
+    intake = {
+        "task_class": args.task_class,
+        "request": args.request,
+        "touches_behavior": args.touches_behavior,
+        "known_cause": args.known_cause,
+        "runnable_acceptance": args.runnable_acceptance,
+        "new_behavior": args.new_behavior,
+        "structural_cleanup": args.structural_cleanup,
+        "micro_deterministic": args.micro_deterministic,
+        "ui_change": False,
+        "external_facts_needed": args.external_facts_needed,
+        "policy_sensitive_doc": False,
+        "needs_remote_delivery": False,
+        "independent_workstreams": max(1, args.workstreams),
+        "risk": args.risk,
+    }
+    return intake
+
+
+def resolve(intake: dict) -> dict:
+    resolver = find_bin("workflow-shape")
+    if not resolver:
+        die("workflow-shape not found: install agent-skills "
+            "(npx skills add tomozard/agent-skills/skills/herdr-agent-team)", 3)
+    payload = json.dumps(intake)
+    result = subprocess.run([resolver, "--intake", "-", "--format", "json"],
+                            input=payload, capture_output=True, text=True)
+    if result.returncode != 0:
+        die(f"workflow-shape refused the intake: {result.stderr.strip() or result.stdout.strip()}", 3)
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        die("workflow-shape returned unreadable JSON", 3)
+    raise AssertionError
+
+
+def staffed_roles(shape: dict) -> list[str]:
+    roles = [entry["role"] for entry in shape.get("staff") or []]
+    roles += list(shape.get("verifiers") or [])
+    return roles
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument("role", nargs="?", help="role to launch (or pass --role)")
+    parser.add_argument("--role", dest="role_flag", help="alias for the positional role")
+    parser.add_argument("--brief", help="brief body written by the controller")
+    parser.add_argument("--request", required=True, help="one line: what the task is")
+    parser.add_argument("--risk", required=True, choices=RISKS)
+    parser.add_argument("--task-class", default="operational", choices=CLASSES)
+    parser.add_argument("--work-branch", help="create or check out this branch before spawning")
+    parser.add_argument("--project")
+    parser.add_argument("--workstream")
+    parser.add_argument("--place", default="child", choices=("child", "tab", "auto"))
+    parser.add_argument("--commit-mode", default="manual", choices=("manual", "auto"))
+    parser.add_argument("--controller")
+    parser.add_argument("--cwd")
+    parser.add_argument("--workstreams", type=int, default=1)
+    parser.add_argument("--dry-run", action="store_true", help="resolve and print, launch nothing")
+    parser.add_argument("--explain", action="store_true",
+                        help="print the resolved shape and stop, even without a role")
+    parser.add_argument("--json", action="store_true")
+    for flag in ("touches-behavior", "known-cause", "runnable-acceptance",
+                 "new-behavior", "structural-cleanup", "micro-deterministic",
+                 "external-facts-needed"):
+        parser.add_argument(f"--{flag}", action="store_true")
+    args = parser.parse_args(argv)
+    args.role = args.role or args.role_flag
+
+    args.touches_behavior = args.touches_behavior
+    args.known_cause = args.known_cause
+    args.runnable_acceptance = args.runnable_acceptance
+    args.new_behavior = args.new_behavior
+    args.structural_cleanup = args.structural_cleanup
+    args.micro_deterministic = args.micro_deterministic
+    args.external_facts_needed = args.external_facts_needed
+
+    task_id = f"{args.project or 'task'}-{slug(args.request)[:24]}-{int(time.time()) % 100000}"
+    intake = build_intake(args, task_id)
+    shape = resolve(intake)
+    allowed = staffed_roles(shape)
+
+    if args.explain or args.dry_run:
+        report = {
+            "task_id": task_id,
+            "shape": shape.get("shape"),
+            "tier": shape.get("tier"),
+            "tier_reason": shape.get("tier_reason"),
+            "staff": shape.get("staff"),
+            "verifiers": shape.get("verifiers"),
+            "requested_role": args.role,
+            "role_allowed": (args.role in allowed) if args.role else None,
+        }
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(f"shape   {shape.get('shape')}  tier {shape.get('tier')}")
+            print(f"why     {shape.get('tier_reason')}")
+            print(f"staff   {', '.join(allowed) or '(none — PM answers itself)'}")
+            if args.role:
+                state = "allowed" if args.role in allowed else "NOT staffed by this shape"
+                print(f"role    {args.role}: {state}")
+        if args.explain or args.dry_run:
+            return 3 if (args.role and args.role not in allowed) else 0
+
+    if not args.role:
+        die("a role is required unless you pass --explain or --dry-run")
+    if args.role not in allowed:
+        die(f"shape {shape.get('shape')} does not staff '{args.role}'; "
+            f"it allows: {', '.join(allowed) or 'no role (answer it yourself)'}", 3)
+
+    if not args.brief:
+        die("--brief is required: the controller writes the task body, not the launcher")
+    brief = Path(args.brief).expanduser()
+    if not brief.is_file():
+        die(f"brief is not readable: {brief}")
+
+    spawner = find_bin("herdr-app-spawn-role")
+    if not spawner:
+        die("herdr-app-spawn-role not found: run setup_harness.sh", 3)
+
+    intake_dir = state_dir() / "intakes"
+    intake_dir.mkdir(parents=True, exist_ok=True)
+    intake_path = intake_dir / f"{task_id}.json"
+    intake_path.write_text(json.dumps(intake, indent=2) + "\n")
+
+    command = [
+        spawner, args.role, str(brief),
+        "--intake", str(intake_path),
+        "--task-tier", str(shape.get("tier")),
+        "--task-class", args.task_class,
+        "--place", args.place,
+        "--commit-mode", args.commit_mode,
+    ]
+    if args.work_branch:
+        command += ["--work-branch", args.work_branch]
+    if args.project:
+        command += ["--project", args.project]
+    if args.workstream:
+        command += ["--workstream", args.workstream]
+    if args.controller:
+        command += ["--controller", args.controller]
+    elif os.environ.get("HC_TERMINAL_ID"):
+        command += ["--controller", os.environ["HC_TERMINAL_ID"]]
+    if args.cwd:
+        command += ["--cwd", args.cwd]
+
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        die(f"spawner refused: {result.stderr.strip() or result.stdout.strip()}", 3)
+
+    report = {"task_id": task_id, "shape": shape.get("shape"), "tier": shape.get("tier"),
+              "intake": str(intake_path), "spawner_reply": result.stdout.strip()}
+    print(json.dumps(report) if args.json else
+          f"dispatched {args.role} · shape {shape.get('shape')} · tier {shape.get('tier')}\n"
+          f"  intake: {intake_path}\n  {result.stdout.strip()}\n"
+          f"  now stop and wait for its message; do not poll the pane.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+REAL_GIT="${HERDR_REAL_GIT:-/usr/bin/git}"
+ROLE="${HERDR_AGENT_ROLE:-unknown}"
+REPO_MODE="${HERDR_REPO_MODE:-read_only}"
+MAY_COMMIT="${HERDR_MAY_LOCAL_COMMIT:-false}"
+MAY_AUTHORIZED_PUSH="${HERDR_MAY_AUTHORIZED_PUSH:-false}"
+MAY_REMOTE="${HERDR_MAY_REMOTE_DELIVER:-false}"
+COMMIT_AUTHORIZATION="${HERDR_COMMIT_AUTHORIZATION:-}"
+COMMIT_MESSAGE_FILE="${HERDR_COMMIT_MESSAGE_FILE:-}"
+PUSH_AUTHORIZATION="${HERDR_PUSH_AUTHORIZATION:-}"
+PUSH_BRANCH="${HERDR_PUSH_BRANCH:-}"
+PUSH_COMMIT="${HERDR_PUSH_COMMIT:-}"
+COMMIT_BRANCH="${HERDR_COMMIT_BRANCH:-}"
+COMMIT_DIFF="${HERDR_COMMIT_DIFF:-}"
+COMMIT_MESSAGE_SHA256="${HERDR_COMMIT_MESSAGE_SHA256:-}"
+COMMIT_MODE="${HERDR_COMMIT_MODE:-manual}"
+OPERATION_MODE="${HERDR_OPERATION_MODE:-implementation}"
+PROTECTED_SYNC_BRANCH="${HERDR_PROTECTED_SYNC_BRANCH:-}"
+
+deny() {
+  echo "git: blocked by Herdr role policy: role=$ROLE command=$1" >&2
+  exit 126
+}
+
+sha256_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    deny "SHA-256 utility unavailable"
+  fi
+}
+
+if [ "$OPERATION_MODE" = "protected-sync" ]; then
+  case "$PROTECTED_SYNC_BRANCH" in
+    main|master|dev|uat|prod) ;;
+    *)
+      deny "invalid protected-sync branch"
+      ;;
+  esac
+  REPO_MODE="read_only"
+  MAY_COMMIT="false"
+  MAY_AUTHORIZED_PUSH="false"
+  MAY_REMOTE="false"
+fi
+
+subcommand=""
+args=("$@")
+index=0
+while [ "$index" -lt "${#args[@]}" ]; do
+  arg="${args[$index]}"
+  case "$arg" in
+    -C|-c|--git-dir|--work-tree|--namespace|--config-env)
+      index=$((index + 2))
+      ;;
+    --git-dir=*|--work-tree=*|--namespace=*|--config-env=*|--no-pager|--paginate|--literal-pathspecs|--no-optional-locks)
+      index=$((index + 1))
+      ;;
+    -*)
+      index=$((index + 1))
+      ;;
+    *)
+      subcommand="$arg"
+      break
+      ;;
+  esac
+done
+
+if [ "$subcommand" = "push" ] && [ "$MAY_REMOTE" != "true" ]; then
+  if [ "$MAY_AUTHORIZED_PUSH" != "true" ]; then
+    deny "push"
+  fi
+
+  case "$ROLE" in
+    supervisor|coder|refactor) ;;
+    *) deny "authorized push role" ;;
+  esac
+
+  if [ "$PUSH_AUTHORIZATION" != "APPROVE_PUSH" ]; then
+    deny "push authorization"
+  fi
+  auth_branch="$PUSH_BRANCH"
+  auth_commit="$PUSH_COMMIT"
+  if [ -z "$auth_branch" ] || [ "${#auth_commit}" -ne 40 ]; then
+    deny "push authorization"
+  fi
+  case "$auth_commit" in
+    *[!0-9a-fA-F]*) deny "push authorization" ;;
+  esac
+  case "$auth_branch" in
+    main|master|dev|uat|prod)
+      deny "protected branch push"
+      ;;
+  esac
+
+  if [ "$index" -gt 0 ]; then
+    current_branch="$($REAL_GIT "${args[@]:0:$index}" branch --show-current)"
+    current_commit="$($REAL_GIT "${args[@]:0:$index}" rev-parse HEAD)"
+  else
+    current_branch="$($REAL_GIT branch --show-current)"
+    current_commit="$($REAL_GIT rev-parse HEAD)"
+  fi
+  if [ "$current_branch" != "$auth_branch" ] || [ "$current_commit" != "$auth_commit" ]; then
+    deny "push branch or commit mismatch"
+  fi
+
+  push_args=("${args[@]:$((index + 1))}")
+  if [ "${#push_args[@]}" -ne 2 ] \
+    || [ "${push_args[0]}" != "origin" ] \
+    || [ "${push_args[1]}" != "$auth_branch" ]; then
+    deny "push shape"
+  fi
+fi
+
+if [ "$subcommand" = "commit" ]; then
+  if [ "$MAY_COMMIT" != "true" ]; then
+    deny "commit"
+  fi
+  case "$ROLE" in
+    supervisor|coder|refactor) ;;
+    *) deny "authorized commit role" ;;
+  esac
+
+  if [ "$COMMIT_AUTHORIZATION" != "APPROVE_COMMIT" ] \
+    && { [ "$COMMIT_AUTHORIZATION" != "AUTO_COMMIT" ] || [ "$COMMIT_MODE" != "auto" ]; }; then
+    deny "commit authorization"
+  fi
+  auth_branch="$COMMIT_BRANCH"
+  auth_diff="$COMMIT_DIFF"
+  auth_message="$COMMIT_MESSAGE_SHA256"
+  case "$auth_branch" in
+    ""|main|master|dev|uat|prod) deny "protected branch commit" ;;
+  esac
+  if [ "${#auth_diff}" -ne 64 ] || [ "${#auth_message}" -ne 64 ]; then
+    deny "commit authorization"
+  fi
+  case "$auth_diff$auth_message" in
+    *[!0-9a-f]*) deny "commit authorization" ;;
+  esac
+
+  commit_args=("${args[@]:$((index + 1))}")
+  if [ -z "$COMMIT_MESSAGE_FILE" ] \
+    || [ ! -s "$COMMIT_MESSAGE_FILE" ] \
+    || [ "${#commit_args[@]}" -ne 3 ] \
+    || [ "${commit_args[0]}" != "--cleanup=verbatim" ] \
+    || [ "${commit_args[1]}" != "-F" ] \
+    || [ "${commit_args[2]}" != "$COMMIT_MESSAGE_FILE" ]; then
+    deny "commit shape"
+  fi
+
+  if [ "$index" -gt 0 ]; then
+    git_prefix=("${args[@]:0:$index}")
+    current_branch="$($REAL_GIT "${git_prefix[@]}" branch --show-current)"
+  else
+    current_branch="$($REAL_GIT branch --show-current)"
+  fi
+  if [ "$current_branch" != "$auth_branch" ]; then
+    deny "commit branch mismatch"
+  fi
+
+  staged_file="$(mktemp "${TMPDIR:-/tmp}/herdr-guard-staged-diff.XXXXXX")"
+  trap 'rm -f "$staged_file"' EXIT
+  if [ "$index" -gt 0 ]; then
+    "$REAL_GIT" "${git_prefix[@]}" diff --cached --binary --no-ext-diff \
+      --no-textconv --src-prefix=a/ --dst-prefix=b/ > "$staged_file"
+  else
+    "$REAL_GIT" diff --cached --binary --no-ext-diff \
+      --no-textconv --src-prefix=a/ --dst-prefix=b/ > "$staged_file"
+  fi
+  if [ ! -s "$staged_file" ]; then
+    deny "empty staged diff"
+  fi
+  current_diff="$(sha256_file "$staged_file")"
+  current_message="$(sha256_file "$COMMIT_MESSAGE_FILE")"
+  if [ "$current_diff" != "$auth_diff" ] || [ "$current_message" != "$auth_message" ]; then
+    deny "commit diff or message mismatch"
+  fi
+fi
+
+if [ "$OPERATION_MODE" = "protected-sync" ]; then
+  sync_args=("${args[@]:$((index + 1))}")
+  case "$subcommand" in
+    switch)
+      if [ -z "$PROTECTED_SYNC_BRANCH" ] \
+        || [ "${#sync_args[@]}" -ne 1 ] \
+        || [ "${sync_args[0]}" != "$PROTECTED_SYNC_BRANCH" ]; then
+        deny "protected-sync switch shape"
+      fi
+      ;;
+    pull)
+      if [ -z "$PROTECTED_SYNC_BRANCH" ] \
+        || [ "${#sync_args[@]}" -ne 3 ] \
+        || [ "${sync_args[0]}" != "--ff-only" ] \
+        || [ "${sync_args[1]}" != "origin" ] \
+        || [ "${sync_args[2]}" != "$PROTECTED_SYNC_BRANCH" ]; then
+        deny "protected-sync pull shape"
+      fi
+      ;;
+    fetch|remote|update-ref|update-index|reflog|gc|maintenance|prune|replace|notes)
+      deny "protected-sync $subcommand"
+      ;;
+  esac
+fi
+
+# PM is a read-only coordinator. It may inspect current status and a bounded
+# diff while establishing scope, but branch history and remote state belong to
+# the executor evidence. Blocking these commands prevents post-completion
+# archaeology from reopening a finished task or widening it to unrelated work.
+if [ "$ROLE" = "pm" ]; then
+  case "$subcommand" in
+    log|show|ls-remote|rev-list|shortlog|describe|blame)
+      deny "pm completion-scope command"
+      ;;
+  esac
+fi
+
+if [ "$REPO_MODE" != "write" ]; then
+  case "$subcommand" in
+    add|am|apply|checkout|cherry-pick|clean|fetch|merge|mv|rebase|reset|restore|revert|rm|stash|update-index|update-ref|reflog|gc|maintenance|prune|replace|notes)
+      deny "$subcommand"
+      ;;
+    commit)
+      [ "$MAY_COMMIT" = "true" ] || deny "$subcommand"
+      ;;
+    pull)
+      [ "$OPERATION_MODE" = "protected-sync" ] || deny "$subcommand"
+      ;;
+    switch)
+      [ "$OPERATION_MODE" = "protected-sync" ] || deny "$subcommand"
+      ;;
+  esac
+
+  case "$subcommand" in
+    remote)
+      for arg in "${args[@]:$((index + 1))}"; do
+        case "$arg" in
+          -v) ;;
+          get-url|show) break ;;
+          *) deny "remote mutation or unsupported inspection" ;;
+        esac
+      done
+      ;;
+    branch)
+      for arg in "${args[@]:$((index + 1))}"; do
+        case "$arg" in
+          -d|-D|-m|-M|-c|-C|--delete|--move|--copy|--edit-description|--set-upstream-to=*|--unset-upstream)
+            deny "branch mutation"
+            ;;
+        esac
+      done
+      ;;
+    config)
+      for arg in "${args[@]:$((index + 1))}"; do
+        case "$arg" in
+          --add|--replace-all|--unset|--unset-all|--rename-section|--remove-section|--edit|-e)
+            deny "config mutation"
+            ;;
+        esac
+      done
+      ;;
+    tag)
+      for arg in "${args[@]:$((index + 1))}"; do
+        case "$arg" in
+          -d|--delete|-a|-s|-u|-f|--annotate|--sign|--local-user=*|--force)
+            deny "tag mutation"
+            ;;
+        esac
+      done
+      ;;
+    worktree)
+      case "${args[$((index + 1))]:-}" in
+        ""|list) ;;
+        *) deny "worktree mutation" ;;
+      esac
+      ;;
+  esac
+fi
+
+exec "$REAL_GIT" "$@"

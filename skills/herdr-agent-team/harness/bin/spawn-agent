@@ -1,0 +1,716 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: spawn-agent --pane ID --role ROLE --project PROJECT --cwd PATH [options]
+
+Options:
+  --workstream NAME          Required label suffix for a named Worker stream
+  --base-branch NAME         Approved local base branch for a Worker
+  --work-branch NAME         Approved Worker branch; existing non-protected branches may be reused
+  --operation MODE           implementation (default) or protected-sync
+  --commit-mode MODE         manual (default) or auto; auto requires AUTO_COMMIT in the approved scope lock
+  --sync-branch NAME         Protected branch for protected-sync
+  --staffing MODE             minimal, focused, or full
+  --controller-role ROLE      Explicit assigning controller (defaults to current role)
+  --task-class CLASS          Task class; document enables scoped document-writing mode
+  --verification-profile PROFILE  independent (default) or deterministic-micro
+  --knowledge-source SOURCE  repository (default) or vault
+  --vault-read-scope PATH     Approved file or directory below the configured vault root
+  --runnable-acceptance       Document task has explicitly approved runnable acceptance
+  --task-tier TIER          Required for routed roles; fixed roles reject it
+  --routing-exception       Permit an explicitly configured alternate for the tier
+  --runtime auto|pi|claude  Routed roles require pi/claude; fixed roles may omit it
+  --model MODEL             Required for routed roles; fixed roles may omit it
+  -h, --help                Show this help
+
+Orchestrator is global and should be started with agent-runtime, not this tool.
+The task tier and runtime/model pair must match the role policy in
+~/.agents/team.json. Fixed child roles resolve their configured default pair
+without tier routing. Configured alternates require --routing-exception. When a
+configured primary provider is disabled, the launcher selects the first enabled
+alternate, records the failover, and marks the effective launch as an exception.
+EOF
+}
+
+PANE=""
+ROLE=""
+PROJECT=""
+WORKSTREAM=""
+BASE_BRANCH=""
+WORK_BRANCH=""
+OPERATION="implementation"
+COMMIT_MODE="manual"
+SYNC_BRANCH=""
+STAFFING="focused"
+CONTROLLER_ROLE=""
+TASK_CLASS="general"
+VERIFICATION_PROFILE="independent"
+KNOWLEDGE_SOURCE="repository"
+VAULT_READ_SCOPE=""
+RUNNABLE_ACCEPTANCE="false"
+TASK_TIER=""
+ROUTING_EXCEPTION="false"
+CWD=""
+RUNTIME=""
+MODEL=""
+VAULT_PATH="${HERDR_TEAM_VAULT_PATH:-}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --pane) PANE="${2:-}"; shift 2 ;;
+    --role) ROLE="${2:-}"; shift 2 ;;
+    --project) PROJECT="${2:-}"; shift 2 ;;
+    --workstream) WORKSTREAM="${2:-}"; shift 2 ;;
+    --base-branch) BASE_BRANCH="${2:-}"; shift 2 ;;
+    --work-branch) WORK_BRANCH="${2:-}"; shift 2 ;;
+    --operation) OPERATION="${2:-}"; shift 2 ;;
+    --commit-mode) COMMIT_MODE="${2:-}"; shift 2 ;;
+    --sync-branch) SYNC_BRANCH="${2:-}"; shift 2 ;;
+    --staffing) STAFFING="${2:-}"; shift 2 ;;
+    --controller-role) CONTROLLER_ROLE="${2:-}"; shift 2 ;;
+    --task-class) TASK_CLASS="${2:-}"; shift 2 ;;
+    --verification-profile) VERIFICATION_PROFILE="${2:-}"; shift 2 ;;
+    --knowledge-source) KNOWLEDGE_SOURCE="${2:-}"; shift 2 ;;
+    --vault-read-scope) VAULT_READ_SCOPE="${2:-}"; shift 2 ;;
+    --runnable-acceptance) RUNNABLE_ACCEPTANCE="true"; shift ;;
+    --task-tier) TASK_TIER="${2:-}"; shift 2 ;;
+    --routing-exception) ROUTING_EXCEPTION="true"; shift ;;
+    --cwd) CWD="${2:-}"; shift 2 ;;
+    --runtime) RUNTIME="${2:-}"; shift 2 ;;
+    --model) MODEL="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "spawn-agent: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ "${HERDR_ENV:-}" != "1" ]; then
+  echo "spawn-agent: HERDR_ENV=1 is required" >&2
+  exit 1
+fi
+
+CALLER_ROLE="${HERDR_AGENT_ROLE:-}"
+if [ -n "$CONTROLLER_ROLE" ] && [ -n "$CALLER_ROLE" ] && [ "$CONTROLLER_ROLE" != "$CALLER_ROLE" ]; then
+  echo "spawn-agent: --controller-role must match the current agent role" >&2
+  exit 1
+fi
+CONTROLLER_ROLE="${CONTROLLER_ROLE:-$CALLER_ROLE}"
+
+if [ -z "$PANE" ] || [ -z "$ROLE" ] || [ -z "$PROJECT" ] || [ -z "$CWD" ]; then
+  usage >&2
+  exit 2
+fi
+
+case "$PROJECT" in
+  *[!a-z0-9_]*|_*|*_|*__*)
+    echo "spawn-agent: project must be lowercase snake_case: $PROJECT" >&2
+    exit 2
+    ;;
+esac
+
+case "$STAFFING" in
+  minimal|focused|full) ;;
+  *) echo "spawn-agent: staffing must be minimal, focused, or full" >&2; exit 2 ;;
+esac
+
+case "$TASK_CLASS" in
+  general|advisory|document|operational|delivery|investigation|bug-fix|feature|refactor) ;;
+  *) echo "spawn-agent: unsupported task class: $TASK_CLASS" >&2; exit 2 ;;
+esac
+
+case "$VERIFICATION_PROFILE" in
+  independent|deterministic-micro) ;;
+  *) echo "spawn-agent: unsupported verification profile: $VERIFICATION_PROFILE" >&2; exit 2 ;;
+esac
+
+case "$KNOWLEDGE_SOURCE" in
+  repository|vault) ;;
+  *) echo "spawn-agent: knowledge source must be repository or vault" >&2; exit 2 ;;
+esac
+
+if [ "$KNOWLEDGE_SOURCE" = "repository" ] && [ -n "$VAULT_READ_SCOPE" ]; then
+  echo "spawn-agent: --vault-read-scope requires --knowledge-source vault" >&2
+  exit 2
+fi
+
+case "$TASK_TIER" in
+  ""|standard|critical) ;;
+  *) echo "spawn-agent: task tier must be standard or critical" >&2; exit 2 ;;
+esac
+
+if [ "$RUNNABLE_ACCEPTANCE" != "true" ] && [ "$TASK_CLASS" = "document" ] \
+  && [ "$ROLE" = "tester" ]; then
+  echo "spawn-agent: Tester requires --runnable-acceptance for document tasks" >&2
+  exit 1
+fi
+
+if [ -n "$WORKSTREAM" ]; then
+  case "$WORKSTREAM" in
+    *[!a-z0-9_]*|_*|*_|*__*)
+      echo "spawn-agent: workstream must be lowercase snake_case: $WORKSTREAM" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+case "$ROLE" in
+  orchestrator)
+    echo "spawn-agent: start the global Orchestrator with agent-runtime" >&2
+    exit 2
+    ;;
+  pm|supervisor|sa|investigator|researcher|designer|documenter|coder|refactor|reviewer|tester) ;;
+  *) echo "spawn-agent: unsupported role: $ROLE" >&2; exit 2 ;;
+esac
+
+case "$OPERATION" in
+  implementation)
+    if [ -n "$SYNC_BRANCH" ]; then
+      echo "spawn-agent: --sync-branch is valid only for protected-sync" >&2
+      exit 2
+    fi
+    ;;
+  protected-sync)
+    case "$ROLE" in
+      coder|refactor) ;;
+      *) echo "spawn-agent: protected-sync is valid only for coder or refactor" >&2; exit 2 ;;
+    esac
+    if [ -z "$SYNC_BRANCH" ]; then
+      echo "spawn-agent: --sync-branch is required for protected-sync" >&2
+      exit 2
+    fi
+    case "$SYNC_BRANCH" in
+      main|master|dev|uat|prod) ;;
+      *) echo "spawn-agent: protected-sync requires a protected branch" >&2; exit 2 ;;
+    esac
+    ;;
+  *) echo "spawn-agent: unsupported operation: $OPERATION" >&2; exit 2 ;;
+esac
+
+case "$COMMIT_MODE" in
+  manual|auto) ;;
+  *) echo "spawn-agent: commit mode must be manual or auto" >&2; exit 2 ;;
+esac
+if [ "$COMMIT_MODE" = "auto" ] && { [ "$OPERATION" != "implementation" ] || { [ "$ROLE" != "supervisor" ] && [ "$ROLE" != "coder" ] && [ "$ROLE" != "refactor" ]; }; }; then
+  echo "spawn-agent: auto commit is valid only for an implementation Supervisor, Coder, or Refactor" >&2
+  exit 2
+fi
+
+case "$ROLE" in
+  documenter)
+    if [ "$CONTROLLER_ROLE" != "pm" ]; then
+      echo "spawn-agent: only PM may launch documenter" >&2
+      exit 1
+    fi
+    if [ "$TASK_CLASS" != "document" ]; then
+      echo "spawn-agent: documenter requires --task-class document" >&2
+      exit 2
+    fi
+    if [ -n "$WORKSTREAM" ] || [ -n "$BASE_BRANCH" ] || [ -n "$WORK_BRANCH" ]; then
+      echo "spawn-agent: documenter does not accept workstream or branch preparation" >&2
+      exit 2
+    fi
+    ;;
+  coder|refactor)
+    case "$CONTROLLER_ROLE" in
+      supervisor) ;;
+      pm)
+        case "$STAFFING" in
+          minimal|focused) ;;
+          full) echo "spawn-agent: PM may launch Workers only for minimal or focused staffing" >&2; exit 1 ;;
+        esac
+        ;;
+      *)
+        echo "spawn-agent: only PM or Supervisor may prepare and launch a Worker" >&2
+        exit 1
+        ;;
+    esac
+    if [ -z "$BASE_BRANCH" ] || [ -z "$WORK_BRANCH" ]; then
+      echo "spawn-agent: --base-branch and --work-branch are required for $ROLE" >&2
+      exit 2
+    fi
+    if [ "$OPERATION" = "protected-sync" ] && [ "$CONTROLLER_ROLE" != "supervisor" ]; then
+      echo "spawn-agent: protected-sync must be launched by Supervisor" >&2
+      exit 1
+    fi
+    if [ "$OPERATION" = "protected-sync" ] \
+      && { [ "$BASE_BRANCH" != "$SYNC_BRANCH" ] || [ "$WORK_BRANCH" != "$SYNC_BRANCH" ]; }; then
+      echo "spawn-agent: protected-sync requires Base branch and Work branch to equal --sync-branch" >&2
+      exit 2
+    fi
+    ;;
+  reviewer|tester)
+    case "$CONTROLLER_ROLE" in
+      pm|supervisor) ;;
+      *)
+        echo "spawn-agent: only PM or Supervisor may launch $ROLE" >&2
+        exit 1
+        ;;
+    esac
+    if [ -n "$WORKSTREAM" ]; then
+      echo "spawn-agent: workstream is valid only for coder or refactor" >&2
+      exit 2
+    fi
+    if [ -n "$BASE_BRANCH" ] || [ -n "$WORK_BRANCH" ]; then
+      echo "spawn-agent: branch preparation is valid only for coder or refactor" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    if [ -n "$WORKSTREAM" ]; then
+      echo "spawn-agent: workstream is valid only for coder or refactor" >&2
+      exit 2
+    fi
+    if [ -n "$BASE_BRANCH" ] || [ -n "$WORK_BRANCH" ]; then
+      echo "spawn-agent: branch preparation is valid only for coder or refactor" >&2
+      exit 2
+    fi
+    ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ -n "${AGENTS_HOME:-}" ] && [ -f "$AGENTS_HOME/team.json" ]; then
+  TEAM_FILE="$AGENTS_HOME/team.json"
+elif [ -f "$REPO_ROOT/.agents/team.json" ]; then
+  TEAM_FILE="$REPO_ROOT/.agents/team.json"
+elif [ -f "$HOME/.agents/team.json" ]; then
+  TEAM_FILE="$HOME/.agents/team.json"
+else
+  echo "spawn-agent: team.json not found; run setup_harness.sh" >&2
+  exit 1
+fi
+
+if [ -z "$CONTROLLER_ROLE" ]; then
+  echo "spawn-agent: assigning controller role is required" >&2
+  exit 1
+fi
+ROLE_POLICY="$(python3 - "$TEAM_FILE" "$CONTROLLER_ROLE" "$ROLE" "$RUNTIME" "$MODEL" "$TASK_TIER" "$ROUTING_EXCEPTION" <<'PY'
+import json
+import sys
+
+team_file, controller_name, role_name, runtime, model, task_tier, routing_exception = sys.argv[1:]
+with open(team_file, encoding="utf-8") as handle:
+    team = json.load(handle)
+if team.get("version") != 4:
+    raise SystemExit("spawn-agent: team.json schema version must be 4")
+disabled_providers = team.get("disabled_model_providers", [])
+if (not isinstance(disabled_providers, list)
+        or any(not isinstance(provider, str) or not provider
+               or provider.strip() != provider or "/" in provider
+               for provider in disabled_providers)
+        or len(disabled_providers) != len(set(disabled_providers))):
+    raise SystemExit("spawn-agent: invalid disabled_model_providers")
+disabled_providers = set(disabled_providers)
+
+def model_provider(candidate_model):
+    return (candidate_model.split("/", 1)[0]
+            if isinstance(candidate_model, str) and "/" in candidate_model else None)
+
+def provider_is_disabled(candidate_model):
+    return model_provider(candidate_model) in disabled_providers
+
+roles = team.get("roles")
+if not isinstance(roles, dict) or role_name not in roles:
+    raise SystemExit(f"spawn-agent: unsupported role: {role_name}")
+configured_providers = {
+    model_provider(candidate_model)
+    for config in roles.values()
+    if isinstance(config, dict)
+    for values in config.get("models", {}).values()
+    if isinstance(values, list)
+    for candidate_model in values
+    if model_provider(candidate_model)
+}
+unknown_disabled = disabled_providers - configured_providers
+if unknown_disabled:
+    raise SystemExit(
+        "spawn-agent: disabled_model_providers contains unknown providers: "
+        + ", ".join(sorted(unknown_disabled))
+    )
+role = roles[role_name]
+selection = role.get("model_selection")
+if selection not in {"fixed", "controller"}:
+    raise SystemExit(f"spawn-agent: invalid model_selection for {role_name}")
+expected_controllers = role.get("reports_to")
+if isinstance(expected_controllers, str):
+    expected_controllers = [expected_controllers]
+controller = roles.get(controller_name)
+if (controller_name not in expected_controllers or not isinstance(controller, dict)
+        or role_name not in controller.get("controls", [])):
+    raise SystemExit(
+        f"spawn-agent: {controller_name or 'unknown'} does not control {role_name}"
+    )
+models = role.get("models")
+if not isinstance(models, dict):
+    raise SystemExit(f"spawn-agent: invalid model allowlist for {role_name}")
+for runtime_name, values in models.items():
+    if (runtime_name not in {"pi", "claude"} or not isinstance(values, list)
+            or not values or any(not isinstance(value, str) or not value for value in values)
+            or len(values) != len(set(values))):
+        raise SystemExit(f"spawn-agent: invalid ordered model allowlist for {role_name}/{runtime_name}")
+
+if selection == "fixed":
+    if role.get("routing") is not None:
+        raise SystemExit(f"spawn-agent: fixed role must not define routing: {role_name}")
+    if task_tier or routing_exception == "true":
+        raise SystemExit(f"spawn-agent: fixed role rejects task tier routing: {role_name}")
+    pairs = [
+        (runtime_name, candidate_model)
+        for runtime_name, values in models.items()
+        for candidate_model in values
+    ]
+    if not any(not provider_is_disabled(candidate_model) for _, candidate_model in pairs):
+        raise SystemExit(f"spawn-agent: fixed role has no enabled model: {role_name}")
+    default_model = role.get("default_model")
+    if default_model and provider_is_disabled(default_model):
+        raise SystemExit(f"spawn-agent: fixed role default uses a disabled provider: {role_name}")
+    if model:
+        if model == "auto":
+            raise SystemExit(f"spawn-agent: fixed role rejects --model auto: {role_name}")
+        matches = [
+            pair for pair in pairs
+            if pair[1] == model and runtime in {"", "auto", pair[0]}
+        ]
+        if len(matches) != 1:
+            raise SystemExit(
+                f"spawn-agent: model is not allowed for {role_name}/{runtime or 'auto'}: {model}"
+            )
+        resolved_runtime, resolved_model = matches[0]
+    else:
+        matches = [pair for pair in pairs if pair[1] == default_model]
+        if len(matches) != 1:
+            raise SystemExit(f"spawn-agent: invalid default_model for fixed role: {role_name}")
+        resolved_runtime, resolved_model = matches[0]
+        if runtime not in {"", "auto", resolved_runtime}:
+            raise SystemExit(f"spawn-agent: fixed role rejects runtime override {runtime}: {role_name}")
+    routing_resolution = "fixed"
+    routing_reason = "configured-fixed-model"
+else:
+    if task_tier not in {"standard", "critical"}:
+        raise SystemExit(f"spawn-agent: controller-selected role requires --task-tier standard or critical: {role_name}")
+    if runtime not in {"pi", "claude"}:
+        raise SystemExit(f"spawn-agent: controller-selected role requires --runtime pi or claude: {role_name}")
+    if not model or model == "auto":
+        raise SystemExit(f"spawn-agent: controller-selected role requires explicit --model: {role_name}")
+    if model not in models.get(runtime, []):
+        raise SystemExit(f"spawn-agent: model is not allowed for {role_name}/{runtime}: {model}")
+    routing = role.get("routing")
+    if not isinstance(routing, dict) or set(routing) != {"standard", "critical"}:
+        raise SystemExit(f"spawn-agent: invalid routing tiers for {role_name}")
+
+    def validate_pair(pair, location):
+        if not isinstance(pair, dict) or set(pair) != {"runtime", "model"}:
+            raise SystemExit(f"spawn-agent: invalid routing pair for {role_name}/{location}")
+        pair_runtime = pair.get("runtime")
+        pair_model = pair.get("model")
+        if pair_model not in models.get(pair_runtime, []):
+            raise SystemExit(f"spawn-agent: routing pair is outside the allowlist for {role_name}/{location}")
+        return pair_runtime, pair_model
+
+    for tier_name, tier_route in routing.items():
+        if not isinstance(tier_route, dict) or set(tier_route) != {"primary", "alternates"}:
+            raise SystemExit(f"spawn-agent: invalid routing policy for {role_name}/{tier_name}")
+        primary = validate_pair(tier_route.get("primary"), f"{tier_name}/primary")
+        alternates = tier_route.get("alternates")
+        if not isinstance(alternates, list):
+            raise SystemExit(f"spawn-agent: invalid routing alternates for {role_name}/{tier_name}")
+        alternate_pairs = [
+            validate_pair(pair, f"{tier_name}/alternate") for pair in alternates
+        ]
+        if primary in alternate_pairs or len(alternate_pairs) != len(set(alternate_pairs)):
+            raise SystemExit(f"spawn-agent: duplicate routing pair for {role_name}/{tier_name}")
+
+    route = routing[task_tier]
+    selected = (runtime, model)
+    primary = (route["primary"]["runtime"], route["primary"]["model"])
+    alternates = [
+        (pair["runtime"], pair["model"]) for pair in route["alternates"]
+    ]
+    if selected == primary:
+        if routing_exception == "true":
+            raise SystemExit(f"spawn-agent: routing exception is not valid for the primary model: {role_name}/{task_tier}")
+        if provider_is_disabled(primary[1]):
+            enabled_alternates = [
+                pair for pair in alternates if not provider_is_disabled(pair[1])
+            ]
+            if not enabled_alternates:
+                raise SystemExit(
+                    f"spawn-agent: no enabled alternate for disabled primary: "
+                    f"{role_name}/{task_tier} ({primary[1]})"
+                )
+            resolved_runtime, resolved_model = enabled_alternates[0]
+            routing_resolution = "disabled-primary-failover"
+            routing_reason = f"primary-provider-{model_provider(primary[1])}-disabled"
+            routing_exception = "true"
+            print(
+                f"spawn-agent: routing failover role={role_name} tier={task_tier} "
+                f"disabled_primary={primary[1]} "
+                f"selected={resolved_runtime}/{resolved_model}",
+                file=sys.stderr,
+            )
+        else:
+            resolved_runtime, resolved_model = selected
+            routing_resolution = "primary"
+            routing_reason = "configured-tier-primary"
+    elif selected in alternates:
+        if provider_is_disabled(model):
+            raise SystemExit(
+                f"spawn-agent: model provider is disabled: {model_provider(model)}"
+            )
+        if routing_exception != "true":
+            raise SystemExit(f"spawn-agent: alternate model requires --routing-exception: {role_name}/{task_tier}")
+        resolved_runtime, resolved_model = selected
+        routing_resolution = "explicit-alternate"
+        routing_reason = "controller-routing-exception"
+    else:
+        raise SystemExit(f"spawn-agent: model does not match routing policy for {role_name}/{task_tier}: {runtime}/{model}")
+
+if provider_is_disabled(resolved_model):
+    raise SystemExit(
+        f"spawn-agent: model provider is disabled: {model_provider(resolved_model)}"
+    )
+
+print("\t".join([
+    selection,
+    resolved_runtime,
+    resolved_model,
+    str(bool(role.get("may_vault_read", False))).lower(),
+    routing_resolution,
+    routing_reason,
+]))
+PY
+)"
+IFS=$'\t' read -r MODEL_SELECTION RUNTIME MODEL MAY_VAULT_READ ROUTING_RESOLUTION ROUTING_REASON <<< "$ROLE_POLICY"
+if [ "$ROUTING_RESOLUTION" = "disabled-primary-failover" ]; then
+  ROUTING_EXCEPTION="true"
+fi
+
+if [ "$KNOWLEDGE_SOURCE" = "vault" ]; then
+  if [ "$ROLE" != "investigator" ] || [ "$MAY_VAULT_READ" != "true" ]; then
+    echo "spawn-agent: scoped vault retrieval is allowed only for Investigator" >&2
+    exit 1
+  fi
+  if [ "$CONTROLLER_ROLE" != "pm" ] || [ "$TASK_CLASS" != "investigation" ]; then
+    echo "spawn-agent: PM must launch vault retrieval as Task class investigation" >&2
+    exit 1
+  fi
+  if [ -z "$VAULT_PATH" ] || [ -z "$VAULT_READ_SCOPE" ]; then
+    echo "spawn-agent: configured vault path and --vault-read-scope are required" >&2
+    exit 2
+  fi
+  if ! VAULT_READ_SCOPE="$(python3 - "$VAULT_PATH" "$VAULT_READ_SCOPE" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+try:
+    vault = Path(sys.argv[1]).expanduser().resolve(strict=True)
+    requested = Path(sys.argv[2]).expanduser()
+    scope = (requested if requested.is_absolute() else vault / requested).resolve(strict=True)
+    scope.relative_to(vault)
+except (OSError, RuntimeError, ValueError):
+    raise SystemExit(1)
+if scope == vault or not os.access(scope, os.R_OK):
+    raise SystemExit(1)
+print(scope)
+PY
+)"; then
+    echo "spawn-agent: vault read scope must be a readable descendant of the configured vault root" >&2
+    exit 1
+  fi
+fi
+
+command -v herdr >/dev/null 2>&1 || {
+  echo "spawn-agent: herdr not found" >&2
+  exit 1
+}
+
+RUNTIME_BIN="$SCRIPT_DIR/agent-runtime"
+if [ ! -x "$RUNTIME_BIN" ]; then
+  RUNTIME_BIN="$(command -v agent-runtime || true)"
+fi
+if [ ! -x "$RUNTIME_BIN" ]; then
+  echo "spawn-agent: agent-runtime not found" >&2
+  exit 1
+fi
+
+PANE_JSON="$(herdr pane get "$PANE" 2>/dev/null || true)"
+if [ -z "$PANE_JSON" ]; then
+  echo "spawn-agent: pane not found: $PANE" >&2
+  exit 1
+fi
+
+PROCESS_JSON="$(herdr pane process-info --pane "$PANE" 2>/dev/null || true)"
+if PANE_JSON="$PANE_JSON" PROCESS_JSON="$PROCESS_JSON" python3 - <<'PY'
+import json, os, re, sys
+texts = []
+for key in ("PANE_JSON", "PROCESS_JSON"):
+    try:
+        data = json.loads(os.environ.get(key, "{}") or "{}")
+    except Exception:
+        continue
+    texts.append(json.dumps(data))
+text = "\n".join(texts)
+busy = re.search(r'"agent"\s*:\s*"(?!"|null)', text, re.I)
+runtime = re.search(r'(^|[ /])(pi|claude)([ "\\]|$)', text, re.I)
+raise SystemExit(0 if busy or runtime else 1)
+PY
+then
+  echo "spawn-agent: target pane already contains an agent; use a blank shell pane: $PANE" >&2
+  exit 1
+fi
+
+prepare_worker_branch() {
+  local real_git current_branch status_output branch_name
+
+  real_git="${HERDR_REAL_GIT:-$(command -v git || true)}"
+  if [ -z "$real_git" ] || [ ! -x "$real_git" ]; then
+    echo "spawn-agent: git not found for Worker branch preparation" >&2
+    return 1
+  fi
+
+  if ! "$real_git" -C "$CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "spawn-agent: Worker requires a Git worktree: $CWD" >&2
+    return 1
+  fi
+
+  for branch_name in "$BASE_BRANCH" "$WORK_BRANCH"; do
+    case "$branch_name" in
+      ""|-*|HEAD|@*|refs/*)
+        echo "spawn-agent: invalid branch name: $branch_name" >&2
+        return 1
+        ;;
+    esac
+    if ! "$real_git" check-ref-format --branch "$branch_name" >/dev/null 2>&1; then
+      echo "spawn-agent: invalid branch name: $branch_name" >&2
+      return 1
+    fi
+  done
+
+  case "$WORK_BRANCH" in
+    main|master|dev|uat|prod)
+      if [ "$OPERATION" != "protected-sync" ] || [ "$WORK_BRANCH" != "$SYNC_BRANCH" ]; then
+        echo "spawn-agent: protected work branch is forbidden: $WORK_BRANCH" >&2
+        return 1
+      fi
+      ;;
+  esac
+
+  if ! "$real_git" -C "$CWD" show-ref --verify --quiet \
+    "refs/heads/$BASE_BRANCH"; then
+    echo "spawn-agent: approved local base branch not found: $BASE_BRANCH" >&2
+    return 1
+  fi
+
+  current_branch="$($real_git -C "$CWD" branch --show-current)"
+  if [ -z "$current_branch" ]; then
+    echo "spawn-agent: cannot prepare a Worker from a detached HEAD" >&2
+    return 1
+  fi
+
+  if [ "$OPERATION" = "protected-sync" ]; then
+    status_output="$($real_git -C "$CWD" status --porcelain --untracked-files=normal)"
+    if [ -n "$status_output" ]; then
+      echo "spawn-agent: worktree must be clean before protected-sync on $SYNC_BRANCH" >&2
+      return 1
+    fi
+    if [ "$current_branch" != "$SYNC_BRANCH" ] \
+      && ! "$real_git" -C "$CWD" switch "$SYNC_BRANCH"; then
+      echo "spawn-agent: failed to switch to protected sync branch $SYNC_BRANCH" >&2
+      return 1
+    fi
+    echo "spawn-agent: prepared protected-sync on $SYNC_BRANCH"
+    return 0
+  fi
+
+  if "$real_git" -C "$CWD" show-ref --verify --quiet \
+    "refs/heads/$WORK_BRANCH"; then
+    : # Reuse an approved existing non-protected Worker branch as-is.
+  else
+    status_output="$($real_git -C "$CWD" status --porcelain --untracked-files=normal)"
+    if [ -n "$status_output" ]; then
+      echo "spawn-agent: worktree must be clean before creating $WORK_BRANCH" >&2
+      return 1
+    fi
+    if ! "$real_git" -C "$CWD" switch -c "$WORK_BRANCH" "$BASE_BRANCH"; then
+      echo "spawn-agent: failed to create work branch $WORK_BRANCH from $BASE_BRANCH" >&2
+      return 1
+    fi
+    current_branch="$WORK_BRANCH"
+  fi
+
+  if [ "$current_branch" != "$WORK_BRANCH" ]; then
+    status_output="$($real_git -C "$CWD" status --porcelain --untracked-files=normal)"
+    if [ -n "$status_output" ]; then
+      echo "spawn-agent: worktree must be clean before switching to $WORK_BRANCH" >&2
+      return 1
+    fi
+    if ! "$real_git" -C "$CWD" switch "$WORK_BRANCH"; then
+      echo "spawn-agent: failed to switch to work branch $WORK_BRANCH" >&2
+      return 1
+    fi
+  fi
+
+  echo "spawn-agent: prepared Worker branch $WORK_BRANCH (base $BASE_BRANCH)"
+}
+
+case "$ROLE" in
+  coder|refactor) prepare_worker_branch ;;
+esac
+
+LABEL="$ROLE-$PROJECT"
+if [ -n "$WORKSTREAM" ]; then
+  LABEL="$LABEL-$WORKSTREAM"
+fi
+
+launch=(env "HERDR_PROJECT=$PROJECT" "HERDR_TASK_BOARD_PROJECT=$PROJECT" \
+  "HERDR_ROUTING_RESOLUTION=$ROUTING_RESOLUTION" \
+  "HERDR_ROUTING_REASON=$ROUTING_REASON" \
+  "HERDR_VOICE_MODE=${HERDR_VOICE_MODE:-off}")
+if [ -n "${HERDR_VOICE_OWNER_FILE:-}" ]; then
+  launch+=("HERDR_VOICE_OWNER_FILE=$HERDR_VOICE_OWNER_FILE")
+fi
+if [ "$KNOWLEDGE_SOURCE" = "vault" ]; then
+  launch+=("HERDR_TEAM_VAULT_PATH=$VAULT_PATH")
+fi
+launch+=("$RUNTIME_BIN" --role "$ROLE" --cwd "$CWD" --runtime "$RUNTIME" \
+  --model "$MODEL" --label "$LABEL" --operation "$OPERATION")
+if [ "$OPERATION" = "protected-sync" ]; then
+  launch+=(--sync-branch "$SYNC_BRANCH")
+fi
+launch+=(--controller-role "$CONTROLLER_ROLE" --staffing "$STAFFING" --task-class "$TASK_CLASS")
+launch+=(--commit-mode "$COMMIT_MODE")
+launch+=(--verification-profile "$VERIFICATION_PROFILE")
+if [ "$KNOWLEDGE_SOURCE" = "vault" ]; then
+  launch+=(--knowledge-source vault --vault-read-scope "$VAULT_READ_SCOPE")
+fi
+if [ "$MODEL_SELECTION" = "controller" ]; then
+  launch+=(--task-tier "$TASK_TIER")
+fi
+if [ "$ROUTING_EXCEPTION" = "true" ]; then
+  launch+=(--routing-exception)
+fi
+printf -v LAUNCH_COMMAND '%q ' "${launch[@]}"
+LAUNCH_COMMAND="${LAUNCH_COMMAND% }"
+
+herdr pane rename "$PANE" "$LABEL"
+herdr pane run "$PANE" "$LAUNCH_COMMAND"
+
+STARTUP_DELAY_SECONDS="${SPAWN_STARTUP_DELAY_SECONDS:-2}"
+sleep "$STARTUP_DELAY_SECONDS"
+
+VERIFY_BIN="$SCRIPT_DIR/verify-pane-agent"
+if [ ! -x "$VERIFY_BIN" ]; then
+  VERIFY_BIN="$(command -v verify-pane-agent || true)"
+fi
+
+if "$VERIFY_BIN" --pane "$PANE" --role "$ROLE" --label "$LABEL" >/dev/null; then
+  echo "spawn-agent: started $LABEL in $PANE"
+  exit 0
+fi
+
+echo "spawn-agent: readiness verification failed for $LABEL in $PANE" >&2
+echo "spawn-agent: controller may inspect metadata, then use its scoped diagnostic transcript permission" >&2
+exit 1
