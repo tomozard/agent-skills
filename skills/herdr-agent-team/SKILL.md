@@ -179,6 +179,13 @@ file-first above ten lines, and never wait or poll — `hc wait`, `herdr agent w
 `herdr agent prompt --wait`, and `herdr pane wait-output` are blocking commands
 this policy forbids, and reading a terminal is diagnostic only.
 
+## Installing the runtime
+
+This skill is the policy layer; `setup.md` (next to this file) is the install
+procedure. Run it when `command -v hteam` prints nothing: it checks prerequisites,
+clones the harness repository, installs the skill layer, then runs
+`setup_harness.sh` and verifies 55 artifacts plus `hteam check`.
+
 ## What is not included
 
 - Spawning and pane layout. The launcher starts roles and owns the topology;

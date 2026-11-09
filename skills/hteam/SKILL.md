@@ -83,8 +83,10 @@ This skill drives the launcher; it does not ship it. The binaries, role files,
 git clone <project-scaffold repo> && cd project-scaffold && ./setup_harness.sh
 ```
 
-If `command -v hteam` is empty, say the harness is not installed and stop —
-do not reconstruct the launcher, and do not copy files into `~/bin` by hand.
+If `command -v hteam` is empty, the harness is not installed. Follow
+`setup.md` next to the `herdr-agent-team` skill (installed at
+`~/.agents/skills/herdr-agent-team/setup.md`) and run its steps in order — do not
+reconstruct the launcher, and do not copy files into `~/bin` by hand.
 
 The launcher starts agents through `bin/agent-runtime`, which picks the runtime
 from the task tier in `team.json` (`standard` → pi, `critical` → claude) and
