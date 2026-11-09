@@ -31,18 +31,25 @@ If any of the three is missing, stop and tell the Human: the team runs inside th
 Herdr desktop app and nothing in this skill installs it. Resume once the app is
 installed and `~/.local/bin/herdr-app` exists.
 
-## Phase 2 — which agent runtimes to use
+## Phase 2 — which runtimes, and which one is primary
 
 ```bash
 ~/.agents/skills/herdr-agent-team/scripts/runtime-probe
 ```
 
-That table is the ground truth for this machine (`pi`, `claude`, `codex`,
-`opencode`, `kiro-cli`, `hermes`). **Ask:** which of the listed runtimes should the
-team use? At least one is required; two is the practical minimum because a writer
-and its verifier must not share a model.
+That table is the ground truth for this machine. **Only `pi` and `claude` are
+routable** — `agent-runtime --runtime pi|claude`; the other CLIs the probe lists
+(`codex`, `opencode`, `kiro-cli`, `hermes`) are detected but cannot host a role
+until an adapter exists. Say that plainly instead of offering them.
 
-List the models for each runtime the Human picked:
+**Ask two things:**
+
+1. Which runtimes should the team use — `pi`, `claude`, or both? (both is the
+   practical default: a writer and its verifier must not share a model)
+2. Which of those is the **primary/default** runtime — the one used when the tier
+   does not override it, and the one fixed roles (`orchestrator`, `pm`) run on?
+
+Then list the models for every enabled runtime:
 
 ```bash
 # pi — the models enabled in this Pi installation
@@ -50,12 +57,32 @@ python3 -c 'import json,os;print("\n".join(json.load(open(os.path.expanduser("~/
 
 # claude — aliases accepted by `claude --model`
 printf '%s\n' opus sonnet haiku
-
-# any other runtime: read its own help, then ask the Human to name the models
-codex --help; opencode --help; kiro-cli --help
 ```
 
-Record the ordered preference — it becomes `runtime_order`.
+Write the answer — the **first** entry is the primary runtime:
+
+```bash
+CFG=~/.agents/skills/herdr-agent-team/config/team.json
+[ -f ~/Workspaces/agent-skills/skills/herdr-agent-team/config/team.json ] && \
+  CFG=~/Workspaces/agent-skills/skills/herdr-agent-team/config/team.json
+python3 - "$CFG" <<'PY'
+import json, sys
+path = sys.argv[1]
+team = json.load(open(path))
+team["runtime_order"] = ["<primary>", "<other>"]   # e.g. ["claude", "pi"] or ["pi"]
+# A fixed role needs a model in every enabled runtime, or the launcher cannot
+# start it when the primary changes. Add the missing runtimes per role:
+#   team["roles"]["orchestrator"]["models"]["claude"] = ["opus"]
+#   team["roles"]["pm"]["models"]["claude"] = ["opus"]
+json.dump(team, open(path, "w"), indent=2, ensure_ascii=False)
+open(path, "a").write("\n")
+PY
+python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runtime_order"])' "$CFG"
+```
+
+If the Human picks `claude` as primary, every fixed role (`orchestrator`, `pm`,
+`designer`) must gain a `models.claude` entry, otherwise the launcher reports
+`cannot resolve a runtime` for that role.
 
 ## Phase 3 — model per tier
 

@@ -131,8 +131,11 @@ for role in expected:
     text = (root / ".agents/agents" / f"{role}.md").read_text()
     if f"name: herdr-{role}" not in text.split("---", 2)[1]:
         raise SystemExit(f"Claude agent name mismatch for {role}")
-if team.get("runtime_order") != ["pi", "claude"]:
-    raise SystemExit("runtime_order must be pi then claude")
+order = team.get("runtime_order")
+if (not isinstance(order, list) or not order
+        or any(entry not in ("pi", "claude") for entry in order)
+        or len(order) != len(set(order))):
+    raise SystemExit("runtime_order must be a non-empty order of pi and claude")
 if team.get("version") != 4:
     raise SystemExit("team schema version must be 4")
 if team.get("disabled_model_providers") != []:

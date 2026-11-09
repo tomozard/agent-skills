@@ -196,7 +196,14 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 
 if team.get("version") != 4:
     raise SystemExit("agent-runtime: team.json schema version must be 4")
-if team.get("runtime_order") != ["pi", "claude"]:
+order = team.get("runtime_order")
+# Any non-empty order of the routable runtimes: entry 0 is the primary runtime,
+# so a machine with only Claude is not forced to put pi first. Only pi and
+# claude are routable (agent-runtime --runtime pi|claude).
+valid = (isinstance(order, list) and order
+         and all(entry in ("pi", "claude") for entry in order)
+         and len(order) == len(set(order)))
+if not valid:
     raise SystemExit("agent-runtime: invalid runtime_order")
 
 disabled_providers = team.get("disabled_model_providers", [])
