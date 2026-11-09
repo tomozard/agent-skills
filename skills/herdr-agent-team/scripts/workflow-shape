@@ -735,4 +735,11 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A consumer that exits early (`--list | head`) closes the pipe; report that as
+    # success instead of a traceback, so `set -o pipefail` callers are not broken.
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
