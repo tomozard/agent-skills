@@ -108,7 +108,7 @@ Model tier routing:
 | Supervisor | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` |
 | Coder | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Claude / `opus` |
 | Refactor | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `antigravity/gemini-3.8-flash` | Claude / `opus` |
-| Reviewer | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Claude / `opus` |
+| Reviewer | Claude / `haiku` | Claude / `haiku` | Claude / `opus` |
 | Tester | Pi / `antigravity/claude-sonnet-4-6` | Pi / `antigravity/claude-sonnet-4-6` | Claude / `sonnet` |
 | Documenter | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` |
 

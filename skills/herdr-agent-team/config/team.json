@@ -379,18 +379,18 @@
       "model_selection": "controller",
       "models": {
         "pi": [
-          "opencode-go/deepseek-v4.1-flash",
           "antigravity/claude-opus-4-6"
         ],
         "claude": [
+          "haiku",
           "opus"
         ]
       },
       "routing": {
         "standard": {
           "primary": {
-            "runtime": "pi",
-            "model": "opencode-go/deepseek-v4.1-flash"
+            "runtime": "claude",
+            "model": "haiku"
           },
           "alternates": [
             {

@@ -213,10 +213,10 @@ models = {
     },
     "reviewer": {
         "pi": [
-            "opencode-go/deepseek-v4.1-flash",
             "antigravity/claude-opus-4-6",
         ],
         "claude": [
+            "haiku",
             "opus",
         ],
     },
@@ -260,7 +260,7 @@ primary_routes = {
         "critical": ("claude", "opus"),
     },
     "reviewer": {
-        "standard": ("pi", "opencode-go/deepseek-v4.1-flash"),
+        "standard": ("claude", "haiku"),
         "critical": ("claude", "opus"),
     },
     "tester": {

@@ -132,9 +132,9 @@ expect "critical coder/reviewer collision uses the reviewer alternate" \
 expect "critical reviewer runs on a non-Claude model" \
   '{"task_class":"feature","new_behavior":true,"risk":"high"}' \
   "model_independence.alternate_models" '{"reviewer": {"model": "antigravity/claude-opus-4-6", "runtime": "pi"}}'
-expect "standard W6 reviewer falls back (coder and reviewer share deepseek)" \
+expect "standard W6 stays independent (reviewer runs claude haiku)" \
   '{"task_class":"bug-fix","structural_cleanup":true,"touches_behavior":true,"known_cause":true,"runnable_acceptance":true}' \
-  "model_independence.status" "alternate"
+  "model_independence.status" "ok"
 expect "a policy document is already independent at standard tier" \
   '{"task_class":"document","policy_sensitive_doc":true}' \
   "model_independence.status" "ok"

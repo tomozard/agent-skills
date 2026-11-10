@@ -324,8 +324,7 @@ roles retain their policy-defined models.
 | Coder | Claude | `opus` |
 | Refactor | Pi | `opencode-go/deepseek-v4.1-flash`, `antigravity/gemini-3.8-flash` |
 | Refactor | Claude | `opus` |
-| Reviewer | Pi | `opencode-go/deepseek-v4.1-flash`, `antigravity/claude-opus-4-6` |
-| Reviewer | Claude | `opus` |
+| Reviewer | Claude | `haiku` (standard), `opus` (critical) |
 | Tester | Pi | `antigravity/claude-sonnet-4-6`, `antigravity/gemini-3.8-flash` |
 | Tester | Claude | `sonnet` |
 
