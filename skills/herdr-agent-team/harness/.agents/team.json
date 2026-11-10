@@ -379,8 +379,8 @@
       "model_selection": "controller",
       "models": {
         "pi": [
-          "antigravity/gemini-3.8-flash",
-          "kiro/gpt-5-6-luna"
+          "kiro/claude-opus-5-5",
+          "antigravity/gemini-3.8-flash"
         ],
         "claude": [
           "opus"
@@ -390,7 +390,7 @@
         "standard": {
           "primary": {
             "runtime": "pi",
-            "model": "kiro/gpt-5-6-luna"
+            "model": "kiro/claude-opus-5-5"
           },
           "alternates": [
             {
@@ -407,7 +407,7 @@
           "alternates": [
             {
               "runtime": "pi",
-              "model": "kiro/gpt-5-6-luna"
+              "model": "kiro/claude-opus-5-5"
             }
           ]
         }
@@ -429,7 +429,7 @@
       "model_selection": "controller",
       "models": {
         "pi": [
-          "kiro/claude-haiku-5-5",
+          "kiro/claude-sonnet-5-5",
           "opencode-go/deepseek-v4.1-flash",
           "antigravity/gemini-3.8-flash"
         ],
@@ -441,7 +441,7 @@
         "standard": {
           "primary": {
             "runtime": "pi",
-            "model": "kiro/claude-haiku-5-5"
+            "model": "kiro/claude-sonnet-5-5"
           },
           "alternates": [
             {

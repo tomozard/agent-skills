@@ -213,8 +213,8 @@ models = {
     },
     "reviewer": {
         "pi": [
+            "kiro/claude-opus-5-5",
             "antigravity/gemini-3.8-flash",
-            "kiro/gpt-5-6-luna",
         ],
         "claude": [
             "opus",
@@ -222,7 +222,7 @@ models = {
     },
     "tester": {
         "pi": [
-            "kiro/claude-haiku-5-5",
+            "kiro/claude-sonnet-5-5",
             "opencode-go/deepseek-v4.1-flash",
             "antigravity/gemini-3.8-flash",
         ],
@@ -261,11 +261,11 @@ primary_routes = {
         "critical": ("claude", "opus"),
     },
     "reviewer": {
-        "standard": ("pi", "kiro/gpt-5-6-luna"),
+        "standard": ("pi", "kiro/claude-opus-5-5"),
         "critical": ("claude", "opus"),
     },
     "tester": {
-        "standard": ("pi", "kiro/claude-haiku-5-5"),
+        "standard": ("pi", "kiro/claude-sonnet-5-5"),
         "critical": ("claude", "sonnet"),
     },
 }
@@ -300,7 +300,7 @@ alternate_routes = {
     },
     "reviewer": {
         "standard": [("pi", "antigravity/gemini-3.8-flash")],
-        "critical": [("pi", "kiro/gpt-5-6-luna")],
+        "critical": [("pi", "kiro/claude-opus-5-5")],
     },
     "tester": {
         "standard": [("pi", "antigravity/gemini-3.8-flash")],
