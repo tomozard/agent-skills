@@ -141,7 +141,6 @@
       "model_selection": "controller",
       "models": {
         "pi": [
-          "alibaba-token-intl/qwen3.8-max",
           "antigravity/gemini-3.8-flash"
         ],
         "claude": [
@@ -154,24 +153,14 @@
             "runtime": "pi",
             "model": "antigravity/gemini-3.8-flash"
           },
-          "alternates": [
-            {
-              "runtime": "pi",
-              "model": "alibaba-token-intl/qwen3.8-max"
-            }
-          ]
+          "alternates": []
         },
         "critical": {
           "primary": {
             "runtime": "claude",
             "model": "opus"
           },
-          "alternates": [
-            {
-              "runtime": "pi",
-              "model": "alibaba-token-intl/qwen3.8-max"
-            }
-          ]
+          "alternates": []
         }
       }
     },
@@ -391,7 +380,7 @@
       "models": {
         "pi": [
           "antigravity/gemini-3.8-flash",
-          "alibaba-token-intl/qwen3.8-max"
+          "kiro/gpt-5-6-luna"
         ],
         "claude": [
           "opus"
@@ -401,7 +390,7 @@
         "standard": {
           "primary": {
             "runtime": "pi",
-            "model": "alibaba-token-intl/qwen3.8-max"
+            "model": "kiro/gpt-5-6-luna"
           },
           "alternates": [
             {
@@ -418,7 +407,7 @@
           "alternates": [
             {
               "runtime": "pi",
-              "model": "alibaba-token-intl/qwen3.8-max"
+              "model": "kiro/gpt-5-6-luna"
             }
           ]
         }
@@ -442,8 +431,7 @@
         "pi": [
           "kiro/claude-haiku-5-5",
           "opencode-go/deepseek-v4.1-flash",
-          "antigravity/gemini-3.8-flash",
-          "alibaba-token-intl/qwen3.8-max"
+          "antigravity/gemini-3.8-flash"
         ],
         "claude": [
           "sonnet"
@@ -456,10 +444,6 @@
             "model": "kiro/claude-haiku-5-5"
           },
           "alternates": [
-            {
-              "runtime": "pi",
-              "model": "alibaba-token-intl/qwen3.8-max"
-            },
             {
               "runtime": "pi",
               "model": "antigravity/gemini-3.8-flash"

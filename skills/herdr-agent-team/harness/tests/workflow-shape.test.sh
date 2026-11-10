@@ -131,7 +131,7 @@ expect "critical coder/reviewer collision uses the reviewer alternate" \
   "model_independence.status" "alternate"
 expect "critical reviewer runs on a non-Claude model" \
   '{"task_class":"feature","new_behavior":true,"risk":"high"}' \
-  "model_independence.alternate_models" '{"reviewer": {"model": "alibaba-token-intl/qwen3.8-max", "runtime": "pi"}}'
+  "model_independence.alternate_models" '{"reviewer": {"model": "kiro/gpt-5-6-luna", "runtime": "pi"}}'
 expect "standard refactor/tester are independent (tester routes to kiro)" \
   '{"task_class":"bug-fix","structural_cleanup":true,"touches_behavior":true,"known_cause":true,"runnable_acceptance":true}' \
   "model_independence.status" "ok"

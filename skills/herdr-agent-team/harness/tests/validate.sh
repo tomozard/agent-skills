@@ -168,7 +168,6 @@ models = {
     },
     "sa": {
         "pi": [
-            "alibaba-token-intl/qwen3.8-max",
             "antigravity/gemini-3.8-flash",
         ],
         "claude": [
@@ -215,7 +214,7 @@ models = {
     "reviewer": {
         "pi": [
             "antigravity/gemini-3.8-flash",
-            "alibaba-token-intl/qwen3.8-max",
+            "kiro/gpt-5-6-luna",
         ],
         "claude": [
             "opus",
@@ -226,7 +225,6 @@ models = {
             "kiro/claude-haiku-5-5",
             "opencode-go/deepseek-v4.1-flash",
             "antigravity/gemini-3.8-flash",
-            "alibaba-token-intl/qwen3.8-max",
         ],
         "claude": [
             "sonnet",
@@ -263,7 +261,7 @@ primary_routes = {
         "critical": ("claude", "opus"),
     },
     "reviewer": {
-        "standard": ("pi", "alibaba-token-intl/qwen3.8-max"),
+        "standard": ("pi", "kiro/gpt-5-6-luna"),
         "critical": ("claude", "opus"),
     },
     "tester": {
@@ -281,8 +279,8 @@ alternate_routes = {
         "critical": [],
     },
     "sa": {
-        "standard": [("pi", "alibaba-token-intl/qwen3.8-max")],
-        "critical": [("pi", "alibaba-token-intl/qwen3.8-max")],
+        "standard": [],
+        "critical": [],
     },
     "investigator": {
         "standard": [("pi", "antigravity/gemini-3.8-flash")],
@@ -302,10 +300,10 @@ alternate_routes = {
     },
     "reviewer": {
         "standard": [("pi", "antigravity/gemini-3.8-flash")],
-        "critical": [("pi", "alibaba-token-intl/qwen3.8-max")],
+        "critical": [("pi", "kiro/gpt-5-6-luna")],
     },
     "tester": {
-        "standard": [("pi", "alibaba-token-intl/qwen3.8-max"), ("pi", "antigravity/gemini-3.8-flash")],
+        "standard": [("pi", "antigravity/gemini-3.8-flash")],
         "critical": [("pi", "antigravity/gemini-3.8-flash")],
     },
 }
@@ -1952,7 +1950,7 @@ TEAM_PI_LOG="$TMP/team-pm-fixed-pi.log" HERDR_ENV=1 HOME="$TMP/team-home" \
 grep -q -- '--model antigravity/gemini-3.8-flash' "$TMP/team-pm-fixed-pi.log" \
   || fail "fixed PM did not resolve its sole configured pair"
 if HERDR_ENV=1 HOME="$TMP/team-home" PATH="$TMP/team-bin:$PATH" \
-  bin/agent-runtime --role pm --runtime pi --model alibaba-token-intl/qwen3.8-max \
+  bin/agent-runtime --role pm --runtime pi --model opencode-go/union-alpha \
   --controller-role orchestrator --task-class feature --cwd "$ROOT" >/dev/null 2>&1; then
   fail "agent-runtime accepted an unlisted model override for fixed PM"
 fi
@@ -2121,7 +2119,7 @@ add_test_alternates "$TMP/team-home/.agents/team.json"
 
 if HERDR_ENV=1 HOME="$TMP/team-home" PATH="$TMP/team-bin:$PATH" \
   bin/agent-runtime --role coder --runtime auto \
-  --model alibaba-token-intl/deepseek-v4.1-flash-1017 --task-tier standard --cwd "$ROOT" >/dev/null 2>&1; then
+  --model opencode-go/union-alpha --task-tier standard --cwd "$ROOT" >/dev/null 2>&1; then
   fail "agent-runtime accepted auto for a controller-selected role"
 fi
 if HERDR_ENV=1 HOME="$TMP/team-home" PATH="$TMP/team-bin:$PATH" \
@@ -2874,7 +2872,7 @@ if HERDR_STUB_LOG="$TMP/spawn-rejected.log" \
   bin/spawn-agent --pane w1:p9 --role coder --project smart_ai \
   --workstream rejected --base-branch main --work-branch feature/rejected \
   --staffing full --cwd "$TMP/spawn-repo" --runtime pi \
-  --model alibaba-token-intl/deepseek-v4.1-flash-1017 --task-tier standard --routing-exception \
+  --model opencode-go/union-alpha --task-tier standard --routing-exception \
   >/dev/null 2>&1; then
   fail "spawn-agent allowed PM to launch a full staffing Worker directly"
 fi

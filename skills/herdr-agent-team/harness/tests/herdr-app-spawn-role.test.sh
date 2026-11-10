@@ -182,7 +182,7 @@ grep -q -- "--runtime claude" "$TMP/calls.log" || fail "--runtime claude was ign
 : > "$TMP/calls.log"
 run_spawn reviewer "$TMP/brief.md" --project demo --controller t32 --task-tier critical \
   --intake "$TMP/intake-critical.json" --runtime pi \
-  --model "alibaba-token-intl/qwen3.8-max" --routing-exception >/dev/null \
+  --model "kiro/gpt-5-6-luna" --routing-exception >/dev/null \
   || fail "reviewer alternate spawn failed: $(cat "$TMP/err")"
 grep -q -- "--routing-exception" "$TMP/calls.log" \
   || fail "the configured alternate was launched without --routing-exception"

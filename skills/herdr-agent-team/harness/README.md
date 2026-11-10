@@ -296,15 +296,14 @@ Controller-selected roles route each assignment to the configured tier
 primary shown in `.agents/protocols/communication.md`. Researcher and
 Documenter use Pi `antigravity/gemini-3.8-flash` for every tier. Planner,
 Supervisor, and Verifier tiers rotate across three Pi families - `opencode-go/
-deepseek-v4.1-flash`, `alibaba-token-intl/qwen3.8-max`, and
+deepseek-v4.1-flash`, `kiro/gpt-5-6-luna`, and
 `antigravity/gemini-3.8-flash` - so planning and review do not run on one
 model lineage; Supervisor stays on the fast Pi model at every tier. Every
 judgment or implementation critical tier uses Claude `opus`, except Tester
 which uses Claude `sonnet`. Reviewer and Tester carry explicit alternates so a
 writer never verifies itself: Reviewer falls back to
-`antigravity/gemini-3.8-flash` on standard and
-`alibaba-token-intl/qwen3.8-max` on critical, and Tester falls back to
-`alibaba-token-intl/qwen3.8-max` on standard and
+`kiro/gpt-5-6-luna` on standard and `kiro/gpt-5-6-luna` on critical, and Tester
+falls back to `antigravity/gemini-3.8-flash` on standard and
 `antigravity/gemini-3.8-flash` on critical. Those alternates exist only for
 the independence rule - a disabled primary with no enabled alternate stops every
 route whose primary uses it. The fixed Orchestrator, PM, and Designer
@@ -314,7 +313,7 @@ roles retain their policy-defined models.
 |---|---|---|
 | PM (fixed) | Pi | `antigravity/gemini-3.8-flash` (multimodal: the Human chat pane) |
 | Supervisor | Pi | `opencode-go/deepseek-v4.1-flash` |
-| SA | Pi | `alibaba-token-intl/qwen3.8-max`, `antigravity/gemini-3.8-flash` |
+| SA | Pi | `antigravity/gemini-3.8-flash`, `kiro/gpt-5-6-luna` |
 | SA | Claude | `opus` |
 | Investigator | Pi | `opencode-go/deepseek-v4.1-flash`, `antigravity/gemini-3.8-flash` |
 | Investigator | Claude | `opus` |
@@ -325,9 +324,9 @@ roles retain their policy-defined models.
 | Coder | Claude | `opus` |
 | Refactor | Pi | `opencode-go/deepseek-v4.1-flash`, `antigravity/gemini-3.8-flash` |
 | Refactor | Claude | `opus` |
-| Reviewer | Pi | `antigravity/gemini-3.8-flash`, `alibaba-token-intl/qwen3.8-max` |
+| Reviewer | Pi | `kiro/gpt-5-6-luna`, `antigravity/gemini-3.8-flash` |
 | Reviewer | Claude | `opus` |
-| Tester | Pi | `opencode-go/deepseek-v4.1-flash`, `antigravity/gemini-3.8-flash` |
+| Tester | Pi | `kiro/claude-haiku-5-5`, `opencode-go/deepseek-v4.1-flash`, `antigravity/gemini-3.8-flash` |
 | Tester | Claude | `sonnet` |
 
 The exact routing policy is authoritative in `.agents/team.json`; the readable

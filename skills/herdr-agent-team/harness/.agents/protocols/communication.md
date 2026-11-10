@@ -101,14 +101,14 @@ Model tier routing:
 | Role | Easy | Advanced | Critical |
 |---|---|---|---|
 | PM (fixed) | Fixed: Pi / `opencode-go/deepseek-v4.1-flash` | Fixed: Pi / `opencode-go/deepseek-v4.1-flash` | Fixed: Pi / `opencode-go/deepseek-v4.1-flash` |
-| SA | Pi / `alibaba-token-intl/qwen3.8-max` | Pi / `antigravity/gemini-3.8-flash` | Claude / `opus` |
+| SA | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` | Claude / `opus` |
 | Investigator | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Claude / `opus` |
 | Researcher | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` |
 | Designer (fixed) | Fixed: Claude / `opus` | Fixed: Claude / `opus` | Fixed: Claude / `opus` |
 | Supervisor | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` |
 | Coder | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Claude / `opus` |
 | Refactor | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `antigravity/gemini-3.8-flash` | Claude / `opus` |
-| Reviewer | Pi / `antigravity/gemini-3.8-flash` | Pi / `alibaba-token-intl/qwen3.8-max` | Claude / `opus` |
+| Reviewer | Pi / `kiro/gpt-5-6-luna` | Pi / `kiro/gpt-5-6-luna` | Claude / `opus` |
 | Tester | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `antigravity/gemini-3.8-flash` | Claude / `sonnet` |
 | Documenter | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` |
 

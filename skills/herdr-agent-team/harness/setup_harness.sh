@@ -18,9 +18,10 @@ EOF
 }
 
 SKIP_VALIDATE=0
+CHECK_ONLY=0
 case "${1:-}" in
   "") ;;
-  --check) exec "$ROOT/tests/validate.sh" ;;
+  --check) CHECK_ONLY=1 ;;
   --skip-validate) SKIP_VALIDATE=1 ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
@@ -91,6 +92,7 @@ if [ "$SKIP_VALIDATE" = 1 ]; then
 else
   run_validate
 fi
+[ "$CHECK_ONLY" = 1 ] && exit 0
 
 copy_file() {
   local source="$1" destination="$2"
