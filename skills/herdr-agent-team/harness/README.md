@@ -296,13 +296,13 @@ Controller-selected roles route each assignment to the configured tier
 primary shown in `.agents/protocols/communication.md`. Researcher and
 Documenter use Pi `antigravity/gemini-3.8-flash` for every tier. Planner,
 Supervisor, and Verifier tiers rotate across three Pi families - `opencode-go/
-deepseek-v4.1-flash`, `kiro/claude-opus-5-5`, and
+deepseek-v4.1-flash`, `antigravity/claude-sonnet-4-6`, and
 `antigravity/gemini-3.8-flash` - so planning and review do not run on one
 model lineage; Supervisor stays on the fast Pi model at every tier. Every
 judgment or implementation critical tier uses Claude `opus`, except Tester
 which uses Claude `sonnet`. Reviewer and Tester carry explicit alternates so a
 writer never verifies itself: Reviewer falls back to
-`kiro/claude-opus-5-5` on standard and `kiro/claude-opus-5-5` on critical, and Tester
+`antigravity/gemini-3.8-flash` on both tiers, and Tester
 falls back to `antigravity/gemini-3.8-flash` on standard and
 `antigravity/gemini-3.8-flash` on critical. Those alternates exist only for
 the independence rule - a disabled primary with no enabled alternate stops every
@@ -313,7 +313,7 @@ roles retain their policy-defined models.
 |---|---|---|
 | PM (fixed) | Pi | `antigravity/gemini-3.8-flash` (multimodal: the Human chat pane) |
 | Supervisor | Pi | `opencode-go/deepseek-v4.1-flash` |
-| SA | Pi | `antigravity/gemini-3.8-flash`, `kiro/claude-opus-5-5` |
+| SA | Pi | `antigravity/gemini-3.8-flash` |
 | SA | Claude | `opus` |
 | Investigator | Pi | `opencode-go/deepseek-v4.1-flash`, `antigravity/gemini-3.8-flash` |
 | Investigator | Claude | `opus` |
@@ -324,9 +324,9 @@ roles retain their policy-defined models.
 | Coder | Claude | `opus` |
 | Refactor | Pi | `opencode-go/deepseek-v4.1-flash`, `antigravity/gemini-3.8-flash` |
 | Refactor | Claude | `opus` |
-| Reviewer | Pi | `kiro/claude-opus-5-5`, `antigravity/gemini-3.8-flash` |
+| Reviewer | Pi | `opencode-go/deepseek-v4.1-flash`, `antigravity/claude-opus-4-6` |
 | Reviewer | Claude | `opus` |
-| Tester | Pi | `kiro/claude-sonnet-5-5`, `opencode-go/deepseek-v4.1-flash`, `antigravity/gemini-3.8-flash` |
+| Tester | Pi | `antigravity/claude-sonnet-4-6`, `antigravity/gemini-3.8-flash` |
 | Tester | Claude | `sonnet` |
 
 The exact routing policy is authoritative in `.agents/team.json`; the readable

@@ -108,8 +108,8 @@ Model tier routing:
 | Supervisor | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` |
 | Coder | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Claude / `opus` |
 | Refactor | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `antigravity/gemini-3.8-flash` | Claude / `opus` |
-| Reviewer | Pi / `kiro/claude-opus-5-5` | Pi / `kiro/claude-opus-5-5` | Claude / `opus` |
-| Tester | Pi / `kiro/claude-sonnet-5-5` | Pi / `kiro/claude-sonnet-5-5` | Claude / `sonnet` |
+| Reviewer | Pi / `opencode-go/deepseek-v4.1-flash` | Pi / `opencode-go/deepseek-v4.1-flash` | Claude / `opus` |
+| Tester | Pi / `antigravity/claude-sonnet-4-6` | Pi / `antigravity/claude-sonnet-4-6` | Claude / `sonnet` |
 | Documenter | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` | Pi / `antigravity/gemini-3.8-flash` |
 
 This table is a human-readable view of the primary routes; `.agents/team.json`

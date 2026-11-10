@@ -379,8 +379,8 @@
       "model_selection": "controller",
       "models": {
         "pi": [
-          "kiro/claude-opus-5-5",
-          "antigravity/gemini-3.8-flash"
+          "opencode-go/deepseek-v4.1-flash",
+          "antigravity/claude-opus-4-6"
         ],
         "claude": [
           "opus"
@@ -390,12 +390,12 @@
         "standard": {
           "primary": {
             "runtime": "pi",
-            "model": "kiro/claude-opus-5-5"
+            "model": "opencode-go/deepseek-v4.1-flash"
           },
           "alternates": [
             {
               "runtime": "pi",
-              "model": "antigravity/gemini-3.8-flash"
+              "model": "antigravity/claude-opus-4-6"
             }
           ]
         },
@@ -407,7 +407,7 @@
           "alternates": [
             {
               "runtime": "pi",
-              "model": "kiro/claude-opus-5-5"
+              "model": "antigravity/claude-opus-4-6"
             }
           ]
         }
@@ -429,8 +429,7 @@
       "model_selection": "controller",
       "models": {
         "pi": [
-          "kiro/claude-sonnet-5-5",
-          "opencode-go/deepseek-v4.1-flash",
+          "antigravity/claude-sonnet-4-6",
           "antigravity/gemini-3.8-flash"
         ],
         "claude": [
@@ -441,7 +440,7 @@
         "standard": {
           "primary": {
             "runtime": "pi",
-            "model": "kiro/claude-sonnet-5-5"
+            "model": "antigravity/claude-sonnet-4-6"
           },
           "alternates": [
             {

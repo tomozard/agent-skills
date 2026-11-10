@@ -603,7 +603,7 @@ Reply required: [ACK], then [DONE] or [STUCK], to pane {sender_pane}
   resolves only Claude `opus` when PM launches it. Documenter and Researcher
   use Pi `antigravity/gemini-3.8-flash` for every tier, and the Planner,
   Supervisor, and Verifier tiers rotate across three Pi families
-  (`opencode-go/deepseek-v4.1-flash`, `kiro/claude-opus-5-5`,
+  (`opencode-go/deepseek-v4.1-flash`, `antigravity/claude-sonnet-4-6`,
   `antigravity/gemini-3.8-flash`) so planning and review never run on a single
   model lineage; Supervisor uses the fast Pi model at every tier. Every judgment
   or implementation critical tier uses Claude `opus`, except Tester which uses

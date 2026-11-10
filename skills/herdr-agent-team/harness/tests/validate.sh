@@ -213,8 +213,8 @@ models = {
     },
     "reviewer": {
         "pi": [
-            "kiro/claude-opus-5-5",
-            "antigravity/gemini-3.8-flash",
+            "opencode-go/deepseek-v4.1-flash",
+            "antigravity/claude-opus-4-6",
         ],
         "claude": [
             "opus",
@@ -222,8 +222,7 @@ models = {
     },
     "tester": {
         "pi": [
-            "kiro/claude-sonnet-5-5",
-            "opencode-go/deepseek-v4.1-flash",
+            "antigravity/claude-sonnet-4-6",
             "antigravity/gemini-3.8-flash",
         ],
         "claude": [
@@ -261,11 +260,11 @@ primary_routes = {
         "critical": ("claude", "opus"),
     },
     "reviewer": {
-        "standard": ("pi", "kiro/claude-opus-5-5"),
+        "standard": ("pi", "opencode-go/deepseek-v4.1-flash"),
         "critical": ("claude", "opus"),
     },
     "tester": {
-        "standard": ("pi", "kiro/claude-sonnet-5-5"),
+        "standard": ("pi", "antigravity/claude-sonnet-4-6"),
         "critical": ("claude", "sonnet"),
     },
 }
@@ -299,8 +298,8 @@ alternate_routes = {
         "critical": [("pi", "opencode-go/deepseek-v4.1-flash")],
     },
     "reviewer": {
-        "standard": [("pi", "antigravity/gemini-3.8-flash")],
-        "critical": [("pi", "kiro/claude-opus-5-5")],
+        "standard": [("pi", "antigravity/claude-opus-4-6")],
+        "critical": [("pi", "antigravity/claude-opus-4-6")],
     },
     "tester": {
         "standard": [("pi", "antigravity/gemini-3.8-flash")],
@@ -2842,7 +2841,7 @@ if HERDR_STUB_LOG="$TMP/spawn-rejected.log" \
   HERDR_AGENT_ROLE=pm SPAWN_STARTUP_DELAY_SECONDS=0 \
   PATH="$TMP/herdr-bin:$PATH" \
   bin/spawn-agent --pane w1:p9 --role reviewer --project smart_ai \
-  --cwd "$TMP/spawn-repo" --runtime pi --model antigravity/gemini-3.8-flash \
+  --cwd "$TMP/spawn-repo" --runtime pi --model opencode-go/deepseek-v4.1-flash \
   --task-tier critical --routing-exception >/dev/null 2>&1; then
   fail "spawn-agent accepted an allowlisted model that is not a configured alternate"
 fi
@@ -2872,7 +2871,7 @@ if HERDR_STUB_LOG="$TMP/spawn-rejected.log" \
   bin/spawn-agent --pane w1:p9 --role coder --project smart_ai \
   --workstream rejected --base-branch main --work-branch feature/rejected \
   --staffing full --cwd "$TMP/spawn-repo" --runtime pi \
-  --model opencode-go/union-alpha --task-tier standard --routing-exception \
+  --model bogus/not-a-model --task-tier standard --routing-exception \
   >/dev/null 2>&1; then
   fail "spawn-agent allowed PM to launch a full staffing Worker directly"
 fi
