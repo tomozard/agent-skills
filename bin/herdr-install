@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# One-command install for herdr-agent-team.
+#
+#   npx -y github:tomozard/agent-skills --yes
+#
+# The skills CLI copies files only and cannot run install scripts, so this
+# wrapper runs both layers: `npx skills add` for the policy layer, then the
+# payload's own setup_harness.sh for the runtime layer. The Human orders the
+# install by passing --yes; without it only the plan is printed.
+set -euo pipefail
+
+SKILL_REPO="tomozard/agent-skills/skills/herdr-agent-team"
+AGENTS="pi claude-code"
+SKILL_DIR="${HERDR_AGENT_TEAM_SKILL_DIR:-$HOME/.agents/skills/herdr-agent-team}"
+INSTALLER="$SKILL_DIR/harness/setup_harness.sh"
+HTEAM="$HOME/bin/hteam"
+LOG_DIR="$HOME/.config/herdr"
+LOG_FILE="$LOG_DIR/install.log"
+
+SKIP_VALIDATE=0
+ASSUME_YES=0
+DRY_RUN=0
+
+usage() {
+  cat <<'EOF'
+Usage: herdr-install [--yes] [--dry-run] [--skip-validate]
+
+Install the herdr-agent-team policy layer (npx skills add) and its runtime
+layer (the payload's setup_harness.sh), then verify with `hteam check --deep`.
+
+  --yes            run the install; without it only the plan is printed
+  --dry-run        print the plan and exit
+  --skip-validate  skip tests/validate.sh (only after machine-local routing edits)
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --yes|-y) ASSUME_YES=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --skip-validate) SKIP_VALIDATE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "herdr-install: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+plan() {
+  echo "herdr-install: plan"
+  echo "  1. npx -y skills add $SKILL_REPO -g -y -a $AGENTS"
+  if [ "$SKIP_VALIDATE" = 1 ]; then
+    echo "  2. $INSTALLER --skip-validate"
+  else
+    echo "  2. $INSTALLER"
+  fi
+  echo "  3. $HTEAM check --deep"
+  echo "  log: $LOG_FILE"
+}
+
+plan
+[ "$DRY_RUN" = 1 ] && exit 0
+if [ "$ASSUME_YES" != 1 ]; then
+  echo >&2
+  echo "herdr-install: re-run with --yes to install (the Human orders this step)." >&2
+  exit 1
+fi
+
+mkdir -p "$LOG_DIR"
+printf '%s herdr-install start user=%s skip_validate=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${USER:-unknown}" "$SKIP_VALIDATE" >>"$LOG_FILE"
+
+echo "herdr-install: skill layer"
+npx -y skills add "$SKILL_REPO" -g -y -a $AGENTS
+
+echo "herdr-install: runtime layer"
+if [ "$SKIP_VALIDATE" = 1 ]; then
+  "$INSTALLER" --skip-validate
+else
+  "$INSTALLER"
+fi
+
+echo "herdr-install: verify"
+if "$HTEAM" check --deep; then
+  printf '%s herdr-install done\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOG_FILE"
+  echo "herdr-install: done — run 'hteam' to open a team, or '/hteam setup' in Pi"
+else
+  printf '%s herdr-install check-failed\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOG_FILE"
+  echo "herdr-install: check --deep failed; rerun $INSTALLER and read the MISS lines" >&2
+  exit 1
+fi

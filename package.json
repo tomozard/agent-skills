@@ -1,0 +1,10 @@
+{
+  "name": "herdr-agent-team",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Install the Herdr agent-team skill (policy layer) and its runtime (setup_harness.sh) with one command.",
+  "bin": {
+    "herdr-install": "bin/herdr-install"
+  },
+  "license": "MIT"
+}

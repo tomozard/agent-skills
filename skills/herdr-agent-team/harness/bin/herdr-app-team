@@ -14,6 +14,7 @@
 # Usage:
 #   herdr-app-team                 start (or report) the Orchestrator in the app
 #   herdr-app-team check           validate prerequisites only
+#   herdr-app-team check --deep    also verify installed artifacts vs the payload
 #   herdr-app-team --space NAME    control space name (default: Herdr Team)
 #   herdr-app-team --folder PATH   where team terminals start (default ~/Workspaces)
 #   herdr-app-team --voice on|off  speak short Thai status from the orchestrator and
@@ -58,10 +59,69 @@ VAULT_PATH="${HERDR_TEAM_VAULT:-$CWD/vault}"
 ACTIVITY_LOG="${HERDR_TEAM_ACTIVITY_LOG:-$VAULT_PATH/log.md}"
 SPACE="${HERDR_TEAM_SPACE:-Herdr Team}"
 MODE="start"
+DEEP=0
 VOICE="${HERDR_VOICE_MODE:-off}"
 
 die()  { echo "herdr-app-team: $*" >&2; exit 1; }
 ok()   { echo "  ok:   $*"; }
+
+# `check --deep` audits what setup_harness.sh installed: every manifest entry must
+# exist, and every installed binary must still match the payload it came from.
+# A MISS is fatal (the runtime is incomplete); a STALE line is a warning, because
+# the team still starts — the installed copy is just older than the payload.
+deep_check() {
+  local failed=0 name manifest dir payload
+
+  echo "  deep check: installed artifacts"
+  if [ -r "$HOME/.agents/project-scaffold-bin-files.txt" ]; then
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      if [ ! -x "$HOME/bin/$name" ]; then
+        echo "  MISS: ~/bin/$name (run setup_harness.sh)" >&2
+        failed=1
+      elif [ -x "$REPO/bin/$name" ] && ! cmp -s "$HOME/bin/$name" "$REPO/bin/$name"; then
+        echo "  STALE: ~/bin/$name differs from the payload (run setup_harness.sh)" >&2
+      fi
+    done < "$HOME/.agents/project-scaffold-bin-files.txt"
+  else
+    echo "  MISS: ~/.agents/project-scaffold-bin-files.txt (run setup_harness.sh)" >&2
+    failed=1
+  fi
+
+  [ -e "$HOME/bin/hteam" ] \
+    || { echo "  MISS: ~/bin/hteam alias (run setup_harness.sh)" >&2; failed=1; }
+
+  for pair in \
+    "$HOME/.agents/project-scaffold-pi-extensions.txt:$HOME/.agents/extensions" \
+    "$HOME/.agents/project-scaffold-claude-agents.txt:$HOME/.claude/agents" \
+    "$HOME/.agents/project-scaffold-voice-files.txt:$HOME/.config/herdr"; do
+    manifest="${pair%%:*}"
+    dir="${pair#*:}"
+    if [ ! -r "$manifest" ]; then
+      echo "  MISS: ${manifest#"$HOME"/} (run setup_harness.sh)" >&2
+      failed=1
+      continue
+    fi
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      [ -e "$dir/$name" ] \
+        || { echo "  MISS: ${dir#"$HOME"/}/$name (run setup_harness.sh)" >&2; failed=1; }
+    done < "$manifest"
+  done
+
+  [ -e "$HOME/.pi/agent/extensions/hteam.ts" ] \
+    || { echo "  MISS: .pi/agent/extensions/hteam.ts (the /hteam command)" >&2; failed=1; }
+  [ -e "$HOME/.agents/team.json" ] \
+    || { echo "  MISS: .agents/team.json (run setup_harness.sh)" >&2; failed=1; }
+  [ -r "$HOME/.agents/agents/orchestrator.md" ] \
+    || { echo "  MISS: .agents/agents/orchestrator.md (run setup_harness.sh)" >&2; failed=1; }
+
+  if [ "$failed" = 1 ]; then
+    echo "deep check failed" >&2
+    exit 1
+  fi
+  echo "  ok:   deep check passed"
+}
 
 usage() {
   sed -n '3,/^$/p' "$SELF" | sed 's/^# \{0,1\}//'; }
@@ -69,6 +129,7 @@ usage() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     check) MODE="check"; shift ;;
+    --deep) DEEP=1; shift ;;
     --space) SPACE="${2:-}"; shift 2 ;;
     --folder) CWD="${2:-}"; shift 2 ;;
     --voice) VOICE="${2:-}"; shift 2 ;;
@@ -128,6 +189,9 @@ if [ "$MODE" = "check" ]; then
     fi
   else
     echo "  ok:   voice: off"
+  fi
+  if [ "$DEEP" = 1 ]; then
+    deep_check
   fi
   echo "herdr-app-team: check passed"
   exit 0

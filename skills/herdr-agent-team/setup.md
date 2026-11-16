@@ -14,7 +14,12 @@ npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-
 
 That command installs the policy layer only. This page covers the runtime
 layer that `npx skills` cannot run (phase 7); `-a pi claude-code` scopes the
-skill to the two runtimes the team supports.
+skill to the two runtimes the team supports. A one-command wrapper runs both
+phases and finishes with `hteam check --deep`:
+
+```bash
+npx -y github:tomozard/agent-skills --yes
+```
 
 ## Hard rules
 

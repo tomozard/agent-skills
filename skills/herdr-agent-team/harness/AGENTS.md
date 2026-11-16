@@ -12,12 +12,14 @@ vault content remains outside this repository.
    `./setup_harness.sh`; never copy them into `~/.agents`, `~/.claude`, or
    `~/bin` manually.
 2. Herdr is the only supported multiplexer. Before any Herdr control command,
-   require `HERDR_ENV=1`. The installed `herdr-team` launcher is the sole
-   startup exception: after direct Human invocation it may target only its
-   dedicated session to check server state, get/focus the global Orchestrator,
-   start that Orchestrator when absent, and attach the Human client. The
-   Human-controlled external harness operator may also run a one-shot read-only
-   audit from outside Herdr after an explicit Human request, limited to
+   require `HERDR_ENV=1`. The installed `hteam` launcher (`bin/herdr-app-team`,
+   the app runtime) is the sole startup exception: after direct Human
+   invocation it may target only its dedicated session to check server state,
+   get/focus the global Orchestrator, start that Orchestrator when absent, and
+   attach the Human client. `herdr-team` is the separate TUI launcher with its
+   own state and is not part of this skill.
+   The Human-controlled external harness operator may also run a one-shot
+   read-only audit from outside Herdr after an explicit Human request, limited to
    `herdr workspace list`, `herdr tab list`, `herdr pane list`, and
    `herdr pane read`. After a separate explicit Human request for each
    delivery, that operator may relay one Human-authored, non-authorizing text
@@ -551,8 +553,9 @@ Reply required: [ACK], then [DONE] or [STUCK], to pane {sender_pane}
 - Supported runtimes: Pi and Claude.
 - `auto` is valid only for fixed roles and resolves their configured default
   pair; it never falls back. The global Orchestrator defaults to Pi
-  `antigravity/gemini-3.8-flash`; `herdr-team --model` accepts only that exact
-  allowlisted model. PM is fixed to Pi `antigravity/gemini-3.8-flash` and is launched
+  `antigravity/gemini-3.8-flash`; the app launcher fixes that model, and only
+  the TUI `herdr-team --model` accepts an explicit allowlisted override. PM is
+  fixed to Pi `antigravity/gemini-3.8-flash` and is launched
   by Orchestrator without tier routing. PM is the Human-facing pane in a chat
   surface that accepts images, so it shares the multimodal Orchestrator model
   rather than a text-first one. Designer is the fixed child role and
@@ -728,7 +731,8 @@ deployment, release, promotion, and production approval remain forbidden.
 - `.agents/skills/agent-shared/`: communication helpers
 - `.agents/protocols/communication.md`: message and escalation contract
 - `~/Workspaces/.agents/workspace-registry.yaml`: global project index
-- `bin/herdr-team`: validate the harness and start the global Orchestrator
+- `bin/herdr-app-team` (`hteam`): start the global Orchestrator in the Herdr app
+- `bin/herdr-team`: validate the harness and start the global Orchestrator (TUI)
 - `bin/agent-runtime`: launch a role in the current Herdr pane
 - `bin/spawn-agent`: launch a role in another Herdr pane
 - `bin/verify-pane-agent`: verify pane metadata without transcript access

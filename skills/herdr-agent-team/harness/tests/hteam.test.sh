@@ -100,6 +100,15 @@ OUT="$(steam check --voice on 2>&1)" || fail "check --voice on failed: $OUT"
 printf '%s' "$OUT" | grep -q "voice: on" || fail "check did not report voice: on: $OUT"
 ok "check reports voice: on"
 
+# --- 4b. check --deep names a missing install ------------------------------
+mkdir -p "$TMP/bare-home"
+if HOME="$TMP/bare-home" steam check --deep >"$TMP/deep.out" 2>"$TMP/deep.err"; then
+  fail "deep check passed with no installed artifacts"
+fi
+grep -q "project-scaffold-bin-files.txt" "$TMP/deep.err" \
+  || fail "deep check did not name the missing manifest: $(cat "$TMP/deep.err")"
+ok "check --deep reports a missing install"
+
 # --- 5. the per-machine config file drives the launcher -------------------
 CONFIG="$TMP/hteam.yaml"
 if ! HERDR_TEAM_CONFIG="$CONFIG" "$ROOT/bin/hteam-config" set space "Config Space" folder "$TMP/work" voice on >/dev/null; then

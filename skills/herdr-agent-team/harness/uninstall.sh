@@ -123,6 +123,8 @@ remove_manifest_entries \
 # Installed separately into Pi's global discovery path so `/hteam` exists in any
 # Pi session; never the whole directory, which holds user extensions too.
 remove_path "$HOME/.pi/agent/extensions/hteam.ts"
+# The hteam alias is a symlink, not a manifest-owned file, so remove it here.
+remove_path "$HOME/bin/hteam"
 remove_manifest_entries \
   "$HOME/.agents/project-scaffold-voice-files.txt" "$HOME/.config/herdr"
 

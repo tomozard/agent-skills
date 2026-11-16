@@ -99,6 +99,10 @@ fi
 if grep -q -- '--watch' bin/herdr-app-team; then
   fail "the launcher still offers the removed intake watcher flag"
 fi
+grep -q -- 'remove_path "$HOME/bin/hteam"' uninstall.sh \
+  || fail "uninstall does not remove the hteam alias"
+grep -q -- 'check --deep' bin/herdr-app-team \
+  || fail "hteam check --deep is missing"
 bash -n bin/task-board || fail "task-board shim syntax failed"
 [ -x "$TASK_BOARD_SRC" ] || fail "task-board: install agent-skills (npx skills add tomozard/agent-skills/skills/herdr-agent-team)"
 python_syntax_ok "$TASK_BOARD_SRC" || fail "task-board Python syntax failed"

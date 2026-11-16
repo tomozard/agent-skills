@@ -196,6 +196,13 @@ npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-
 
 Then `hteam check` and `hteam`. `-a pi claude-code` scopes the skill to the two
 runtimes the team supports; without it `npx skills` links every detected agent.
+A one-command wrapper runs both phases and verifies the result with
+`hteam check --deep`:
+
+```bash
+npx -y github:tomozard/agent-skills --yes
+```
+
 `setup.md` (next to this file) is the guided procedure when the Human asks to
 install, configure, or repair the team: it covers the runtime choices, the
 install phase, and verification of the 55 installed artifacts.

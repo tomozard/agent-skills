@@ -28,6 +28,12 @@ Then `hteam check` and `hteam`. `-a pi claude-code` scopes the skill to the two
 runtimes the team supports; without it `npx skills` links every detected agent.
 Use `--skip-validate` only after machine-local routing edits.
 
+Or one command, which runs both phases and ends with `hteam check --deep`:
+
+```bash
+npx -y github:tomozard/agent-skills --yes
+```
+
 ## Installation
 
 Install all skills in this repository:
