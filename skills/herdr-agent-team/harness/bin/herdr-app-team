@@ -114,7 +114,7 @@ if [ "$MODE" = "check" ]; then
     echo "  MISS: role spawner (run setup_harness.sh)" >&2
     exit 1
   fi
-  if [ -x "$REPO/bin/clickup-watch" ]; then
+  if [ -x "$REPO/bin/clickup-status" ]; then
     echo "  ClickUp helpers:"
     "$REPO/bin/clickup-status" check || echo "  warn: ClickUp helpers are not ready (hteam still starts; ask/mark will fail)" >&2
   else
