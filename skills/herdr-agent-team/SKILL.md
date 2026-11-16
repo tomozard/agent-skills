@@ -163,6 +163,24 @@ A runtime is judged by verbs, not by name: `launch`, `ask`, `send`, `resume`,
 resolve a role with `scripts/roster`; the contract, the per-CLI invocations, and
 the degraded modes are in [`references/runtime-adapters.md`](references/runtime-adapters.md).
 
+## Memory vault
+
+The vault is an optional memory root — long-term notes plus the OKF activity log
+— configured per machine with `/hteam setup` or
+`hteam-config set vault <path> activity_log <path>/log.md`. It is opt-in: with no
+vault configured the team works normally and nothing reads or writes notes.
+
+Two roles touch it, and only this way:
+
+- **Investigator** reads one scope named in an approved `investigation` task
+  (`Knowledge source: vault`, a `Vault read scope` below the configured root,
+  plus query, exclusions, result limit, and evidence format). It is read-only:
+  no root scan, no symlink escape, no mutation.
+- **Documenter** writes only the approved `log.md` completion entry.
+
+`uninstall.sh` never deletes the vault. Full rules: phase 4 of [`setup.md`](setup.md)
+and [`roles/investigator.md`](references/roles/investigator.md).
+
 ## Communication
 
 `references/communication-protocol.md` is the full contract: envelope, ACK /
@@ -231,6 +249,7 @@ install phase, and verification of the 55 installed artifacts.
 | one role's identity and authority | `references/roles/<role>.md` |
 | where a role runs (space, tab, child terminal) | `references/placement.md` |
 | another agent CLI | `references/runtime-adapters.md` |
+| memory vault (opt-in, scoped read-only) | `setup.md` phase 4, `references/roles/investigator.md` |
 
 ## Pitfalls
 
