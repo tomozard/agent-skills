@@ -14,6 +14,33 @@ it gives you one space per project and child terminals under each controller —
 but the policy, the resolver, and the task board work with any runtime that can
 spawn a process and send a message.
 
+## Team at a glance
+
+The team divides work three ways: by **authority layer** (who may decide), by
+**delivery stage** (what happens next), and by **shape** (how large the team
+is). Twelve roles sit in three layers, plus an optional controller:
+
+```text
+Human
+├── Orchestrator   bootstrap only: registry, harness, project lifecycle, cross-project
+└── PM             one per project; the Human's only project conversation
+    ├── Planner      sa, investigator, researcher, designer   (read-only)
+    ├── Worker       coder, refactor                           (scoped writes)
+    ├── Verifier     reviewer, tester                          (independent)
+    ├── Documenter   approved documents only
+    └── Supervisor   optional: full / multi-worker / revision loops
+```
+
+| Division | Count | Decided by |
+|---|---|---|
+| Authority layers | 3 + optional controller | who may write, verify, approve, and report |
+| Delivery stages | 8 | describe → resolve → lock → execute → freeze → verify → commit → deliver |
+| Shapes | 11 (`W0`–`W10`) | the smallest team the task's evidence needs |
+
+Each layer's authority, each stage's owner and stop gate, the full shape
+catalogue, and the decisions that stay with the Human are in
+[`references/team-at-a-glance.md`](references/team-at-a-glance.md).
+
 ## Two entry points
 
 - **Start or check the team** — the Human types `hteam` or `/hteam`, or the app
@@ -106,7 +133,7 @@ Twelve role contracts live in `references/roles/`. They are written as identity
 and policy, not as transport: replace "session" with your runtime's unit of an
 agent process.
 
-| Layer | Roles |
+| Group | Roles |
 |---|---|
 | bootstrap | `orchestrator` |
 | project owner | `pm` |
@@ -180,6 +207,7 @@ clones the harness repository, installs the skill layer, then runs
 
 | Question | Read |
 |---|---|
+| how the work is divided (layers, stages, shapes, gates) | `references/team-at-a-glance.md` |
 | start, check, or configure the app team | `references/launcher.md` |
 | who should work on this task | `references/workflow-shapes.md` |
 | messages, verdicts, commit gates | `references/communication-protocol.md` |
