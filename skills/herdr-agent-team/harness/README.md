@@ -496,9 +496,9 @@ task over.
 There is no `auto_intake` registry setting and no polling interval: a project
 does not need a ClickUp entry for the team to work on it, and no state survives
 in `~/.local/state/herdr-app-team/clickup-status/` except the small ask/mark
-ledger. The old `clickup-watch` command, config file, and `CLICKUP_WATCH_*` env
-names still work as deprecated aliases. If the MCP login expires, run
-`pi mcp login clickup`; `clickup-status check` reports it.
+ledger. The old `clickup-watch` command is gone; a legacy `clickup-watch.yaml`
+config file and the `CLICKUP_WATCH_*` env names are still accepted. If the MCP
+login expires, run `pi mcp login clickup`; `clickup-status check` reports it.
 
 ## Spawn a Project Agent
 

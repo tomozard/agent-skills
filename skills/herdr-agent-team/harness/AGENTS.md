@@ -420,8 +420,6 @@ user (default `me`). A task a person already holds is left to that person, and
 the human closing, rejecting, or merging it stays with the Human — `done`,
 `complete`, `reject`, review, and merge statuses are never written by an agent.
 
-The old `clickup-watch` command remains a deprecated alias for one release.
-
 **PM owns task status**; Workers never touch ClickUp. A PM question parks the
 task in `discuss`; the Human answers in ClickUp and continues the conversation
 in the PM pane. Neither helper grants scope, commit, push, or PR authority.

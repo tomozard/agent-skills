@@ -72,7 +72,7 @@ in_target() {
 }
 
 # PyYAML is pip --user, i.e. per-HOME. A fresh macOS account has none, and
-# validate.sh then dies at "clickup-watch tests failed" without naming the cause.
+# validate.sh then dies at "clickup-status tests failed" without naming the cause.
 # The isolated HOME inherits this machine's user site-packages so the rehearsal
 # tests the install logic; the prerequisite is reported, not hidden.
 PY_SHIM=""
@@ -117,7 +117,7 @@ if [ "$MODE" = "real" ]; then
   want_ok "$HARNESS_SRC/uninstall.sh" --check
 
   step "2. verify the machine is bare"
-  for cmd in hteam herdr-app-team agent-runtime spawn-agent task-board workflow-shape clickup-status clickup-watch; do
+  for cmd in hteam herdr-app-team agent-runtime spawn-agent task-board workflow-shape clickup-status; do
     command -v "$cmd" >/dev/null && bad "$cmd still on PATH ($(command -v "$cmd"))" || ok "$cmd gone"
   done
   for p in "$HOME/.agents/team.json" "$HOME/.agents/agents" "$HOME/.agents/agents.md" \

@@ -5,7 +5,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLI="$ROOT/bin/clickup-status"
-ALIAS="$ROOT/bin/clickup-watch"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -67,8 +66,7 @@ if CLICKUP_MCP_TOKEN_FILE="$TMP/no-such-token" "$CLI" check >"$TMP/check.txt" 2>
 fi
 grep -q "MISS: ClickUp MCP login" "$TMP/check.txt" || fail "check did not name the missing login"
 
-# 8. the deprecated alias and the legacy env names still work.
-"$ALIAS" status >/dev/null 2>&1 || fail "the clickup-watch alias does not run"
+# 8. the legacy env names still work.
 legacy_out="$(CLICKUP_STATUS_CONFIG= CLICKUP_WATCH_CONFIG="$TMP/clickup-status.yaml" "$CLI" status 2>&1)" \
   || fail "the legacy CLICKUP_WATCH_CONFIG env is no longer accepted"
 grep -q "config:.*$TMP/clickup-status.yaml" <<<"$legacy_out" || fail "legacy env did not reach the config"

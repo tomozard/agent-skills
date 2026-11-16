@@ -77,11 +77,13 @@ grep -q 'does not staff' bin/hteam-dispatch || fail "hteam-dispatch does not gat
 python3 -m py_compile bin/hteam-config || fail "hteam-config Python syntax failed"
 [ -x bin/clickup-status ] || fail "clickup-status CLI is not executable"
 python3 -m py_compile bin/clickup-status || fail "clickup-status Python syntax failed"
-[ -x bin/clickup-watch ] || fail "the deprecated clickup-watch alias is not executable"
 grep -q 'There is no intake loop here' bin/clickup-status \
-  || fail "clickup-watch must stay a status helper, not an intake loop"
+  || fail "clickup-status must stay a status helper, not an intake loop"
 if grep -q 'add_parser("loop"\|add_parser("start"\|add_parser("stop"\|add_parser("once"' bin/clickup-status; then
   fail "clickup-status still offers the removed intake loop"
+fi
+if [ -e bin/clickup-watch ]; then
+  fail "the removed clickup-watch alias came back"
 fi
 if grep -q -- '--watch' bin/herdr-app-team; then
   fail "the launcher still offers the removed intake watcher flag"

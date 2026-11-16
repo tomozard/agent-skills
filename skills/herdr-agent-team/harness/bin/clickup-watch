@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Deprecated alias for clickup-status. The intake loop this name used to
-# describe is gone; the tool now only keeps ClickUp status in step with the
-# work. Kept for one release so existing scripts keep working.
-exec "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/clickup-status" "$@"
