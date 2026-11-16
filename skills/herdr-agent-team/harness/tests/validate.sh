@@ -186,6 +186,7 @@ models = {
         ],
         "claude": [
             "opus",
+            "fable",
         ],
     },
     "investigator": {
@@ -195,6 +196,7 @@ models = {
         ],
         "claude": [
             "opus",
+            "fable",
         ],
     },
     "researcher": {
@@ -214,6 +216,7 @@ models = {
         ],
         "claude": [
             "opus",
+            "fable",
         ],
     },
     "refactor": {
@@ -223,6 +226,7 @@ models = {
         ],
         "claude": [
             "opus",
+            "fable",
         ],
     },
     "reviewer": {
@@ -232,6 +236,7 @@ models = {
         "claude": [
             "haiku",
             "opus",
+            "fable",
         ],
     },
     "tester": {
@@ -293,27 +298,27 @@ alternate_routes = {
     },
     "sa": {
         "standard": [],
-        "critical": [],
+        "critical": [("claude", "fable")],
     },
     "investigator": {
         "standard": [("pi", "antigravity/gemini-3.8-flash")],
-        "critical": [("pi", "antigravity/gemini-3.8-flash")],
+        "critical": [("claude", "fable"), ("pi", "antigravity/gemini-3.8-flash")],
     },
     "researcher": {
         "standard": [],
         "critical": [],
     },
     "coder": {
-        "standard": [("pi", "antigravity/gemini-3.8-flash")],
-        "critical": [("pi", "opencode-go/deepseek-v4.1-flash")],
+        "standard": [("claude", "fable"), ("pi", "antigravity/gemini-3.8-flash")],
+        "critical": [("claude", "fable"), ("pi", "opencode-go/deepseek-v4.1-flash")],
     },
     "refactor": {
         "standard": [("pi", "opencode-go/deepseek-v4.1-flash")],
-        "critical": [("pi", "opencode-go/deepseek-v4.1-flash")],
+        "critical": [("claude", "fable"), ("pi", "opencode-go/deepseek-v4.1-flash")],
     },
     "reviewer": {
-        "standard": [("pi", "antigravity/claude-opus-4-6")],
-        "critical": [("pi", "antigravity/claude-opus-4-6")],
+        "standard": [("claude", "fable"), ("pi", "antigravity/claude-opus-4-6")],
+        "critical": [("claude", "fable"), ("pi", "antigravity/claude-opus-4-6")],
     },
     "tester": {
         "standard": [("pi", "antigravity/gemini-3.8-flash")],

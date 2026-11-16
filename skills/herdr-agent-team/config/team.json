@@ -144,7 +144,8 @@
           "antigravity/gemini-3.8-flash"
         ],
         "claude": [
-          "opus"
+          "opus",
+          "fable"
         ]
       },
       "routing": {
@@ -160,7 +161,12 @@
             "runtime": "claude",
             "model": "opus"
           },
-          "alternates": []
+          "alternates": [
+            {
+              "runtime": "claude",
+              "model": "fable"
+            }
+          ]
         }
       }
     },
@@ -182,7 +188,8 @@
           "antigravity/gemini-3.8-flash"
         ],
         "claude": [
-          "opus"
+          "opus",
+          "fable"
         ]
       },
       "routing": {
@@ -204,6 +211,10 @@
             "model": "opus"
           },
           "alternates": [
+            {
+              "runtime": "claude",
+              "model": "fable"
+            },
             {
               "runtime": "pi",
               "model": "antigravity/gemini-3.8-flash"
@@ -283,7 +294,8 @@
           "antigravity/gemini-3.8-flash"
         ],
         "claude": [
-          "opus"
+          "opus",
+          "fable"
         ]
       },
       "routing": {
@@ -293,6 +305,10 @@
             "model": "opencode-go/deepseek-v4.1-flash"
           },
           "alternates": [
+            {
+              "runtime": "claude",
+              "model": "fable"
+            },
             {
               "runtime": "pi",
               "model": "antigravity/gemini-3.8-flash"
@@ -305,6 +321,10 @@
             "model": "opus"
           },
           "alternates": [
+            {
+              "runtime": "claude",
+              "model": "fable"
+            },
             {
               "runtime": "pi",
               "model": "opencode-go/deepseek-v4.1-flash"
@@ -333,7 +353,8 @@
           "antigravity/gemini-3.8-flash"
         ],
         "claude": [
-          "opus"
+          "opus",
+          "fable"
         ]
       },
       "routing": {
@@ -355,6 +376,10 @@
             "model": "opus"
           },
           "alternates": [
+            {
+              "runtime": "claude",
+              "model": "fable"
+            },
             {
               "runtime": "pi",
               "model": "opencode-go/deepseek-v4.1-flash"
@@ -383,7 +408,8 @@
         ],
         "claude": [
           "haiku",
-          "opus"
+          "opus",
+          "fable"
         ]
       },
       "routing": {
@@ -393,6 +419,10 @@
             "model": "haiku"
           },
           "alternates": [
+            {
+              "runtime": "claude",
+              "model": "fable"
+            },
             {
               "runtime": "pi",
               "model": "antigravity/claude-opus-4-6"
@@ -405,6 +435,10 @@
             "model": "opus"
           },
           "alternates": [
+            {
+              "runtime": "claude",
+              "model": "fable"
+            },
             {
               "runtime": "pi",
               "model": "antigravity/claude-opus-4-6"
