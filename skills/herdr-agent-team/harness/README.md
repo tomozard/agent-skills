@@ -440,19 +440,18 @@ Prerequisites on the target Mac:
 1. macOS with `Herdr.app` installed and opened once (`herdr-app` and
    `herdr-core` land in `~/.local/bin`).
 2. `pi` installed and authenticated (`pi --version`).
-3. This repo checked out somewhere stable.
+3. `npx` (Node.js 18+) so the skill layer can be installed.
 4. The workspace registry at `~/Workspaces/.agents/workspace-registry.yaml`
    (or set `HERDR_TEAM_REGISTRY`).
 
-Then:
+Then, from any directory:
 
 ```bash
-# 1. the team tooling itself (workflow-shape, task-board) lives in agent-skills
-npx skills add tomozard/agent-skills/skills/herdr-agent-team
+# 1. the policy layer, with the team tooling (workflow-shape, task-board)
+npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-code
 
-# 2. this harness installs hteam, herdr-app-team, herdr-app-spawn-role, roles
-cd /path/to/project-scaffold
-./setup_harness.sh
+# 2. the runtime layer: hteam, herdr-app-team, roles, extensions, guards
+~/.agents/skills/herdr-agent-team/harness/setup_harness.sh
 hteam check                 # must pass
 hteam                       # open the app and start the Orchestrator
 ```

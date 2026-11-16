@@ -14,6 +14,20 @@ A curated collection of AI Agent skills and architectural workflows for coding a
 > installed it separately, run `npx skills remove hteam -g -y` and install
 > `herdr-agent-team` — the `/hteam` command itself is unaffected.
 
+### herdr-agent-team — full install (policy + runtime)
+
+`npx skills add` installs the policy layer only; the skills CLI cannot run
+install scripts. Two commands install everything, runnable from any directory:
+
+```bash
+npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-code
+~/.agents/skills/herdr-agent-team/harness/setup_harness.sh
+```
+
+Then `hteam check` and `hteam`. `-a pi claude-code` scopes the skill to the two
+runtimes the team supports; without it `npx skills` links every detected agent.
+Use `--skip-validate` only after machine-local routing edits.
+
 ## Installation
 
 Install all skills in this repository:

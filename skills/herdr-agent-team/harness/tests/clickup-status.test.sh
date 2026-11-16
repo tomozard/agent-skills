@@ -13,7 +13,16 @@ export CLICKUP_STATUS_STATE_DIR="$TMP/state"
 
 fail() { echo "clickup-status test: $*" >&2; exit 1; }
 
-python3 -m py_compile "$CLI" || fail "python syntax failed"
+# Compile in memory: python -m py_compile writes __pycache__ next to the source.
+python_syntax_ok() {
+  python3 - "$1" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    compile(handle.read(), sys.argv[1], "exec")
+PY
+}
+
+python_syntax_ok "$CLI" || fail "python syntax failed"
 [ -x "$CLI" ] || fail "clickup-status is not executable"
 
 # 1. The intake loop is gone; only the status helpers remain.

@@ -6,7 +6,15 @@ in order, apply each answer with the command given, then move on. Do not batch t
 questions and do not invent answers — every value here is the Human's choice.
 
 The payload ships inside this skill under `harness/`; there is no second
-repository to clone.
+repository to clone. Installing the skill is a separate, earlier step:
+
+```bash
+npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-code
+```
+
+That command installs the policy layer only. This page covers the runtime
+layer that `npx skills` cannot run (phase 7); `-a pi claude-code` scopes the
+skill to the two runtimes the team supports.
 
 ## Hard rules
 
@@ -213,10 +221,13 @@ ask` and `mark` are available, and nothing polls a list.
 
 ## Phase 7 — install
 
+The runtime installer writes global paths and takes no arguments beyond these
+flags, so it runs from any directory:
+
 ```bash
-cd ~/.agents/skills/herdr-agent-team/harness && ./setup_harness.sh
+~/.agents/skills/herdr-agent-team/harness/setup_harness.sh
 # after custom routing in phase 3:
-cd ~/.agents/skills/herdr-agent-team/harness && ./setup_harness.sh --skip-validate
+~/.agents/skills/herdr-agent-team/harness/setup_harness.sh --skip-validate
 ```
 
 Point `repo` at the installed harness so the launcher does not need the old
@@ -234,7 +245,7 @@ canonical config, the guard binaries, the extensions, the Claude agent definitio
 ## Phase 8 — verify before reporting success
 
 ```bash
-cd ~/.agents/skills/herdr-agent-team/harness && ./uninstall.sh --check   # expect 55
+~/.agents/skills/herdr-agent-team/harness/uninstall.sh --check   # expect 55
 readlink ~/.agents/team.json
 hteam-config show                       # vault, folder, registry = the answers
 command -v hteam && hteam check
@@ -268,10 +279,10 @@ EOF
 ```bash
 # update the payload, then reinstall
 npx skills update herdr-agent-team -g -y
-cd ~/.agents/skills/herdr-agent-team/harness && ./setup_harness.sh
+~/.agents/skills/herdr-agent-team/harness/setup_harness.sh
 
 # remove
-cd ~/.agents/skills/herdr-agent-team/harness && ./uninstall.sh
+~/.agents/skills/herdr-agent-team/harness/uninstall.sh
 npx skills remove herdr-agent-team -g -y
 rm -f ~/.hermes/skills/herdr-agent-team
 ```
@@ -288,6 +299,6 @@ or `~/.config/herdr-team/setup-answers.md`.
 | `clickup-status tests failed` | PyYAML absent, gate bypassed | install PyYAML (`python3 -m pip install --user pyyaml`), re-run |
 | `validate: …` after phase 3 | suite asserts shipped model tables | use `--skip-validate`, keep the roster check |
 | `model_independence.status` not `ok` | writer and verifier share a model | change one model or the tier |
-| `missing role file` | phase 7 not run, or wrong directory | `cd …/harness && ./setup_harness.sh` |
+| `missing role file` | phase 7 not run, or wrong directory | `~/.agents/skills/herdr-agent-team/harness/setup_harness.sh` |
 | `coder cannot start on protected branch` | dispatch without `--work-branch` | pass the branch from the scope lock |
 | `herdr app window is not reachable` | Herdr.app closed | open the app, re-run `hteam check` |

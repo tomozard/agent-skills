@@ -5,6 +5,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE="$ROOT/.agents"
 
+# Never write bytecode into the installed skill tree: imports and py_compile
+# would create __pycache__ under ~/.agents, which fails in sandboxed shells and
+# dirties a directory `npx skills` owns.
+export PYTHONDONTWRITEBYTECODE=1
+
 usage() {
   cat <<'EOF'
 Usage: setup_harness.sh [--check|--skip-validate]

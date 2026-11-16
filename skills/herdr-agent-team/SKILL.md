@@ -185,10 +185,20 @@ this policy forbids, and reading a terminal is diagnostic only.
 
 ## Installing the runtime
 
-This skill is the policy layer; `setup.md` (next to this file) is the install
-procedure. Run it when `command -v hteam` prints nothing: it checks prerequisites,
-clones the harness repository, installs the skill layer, then runs
-`setup_harness.sh` and verifies 55 artifacts plus `hteam check`.
+`npx skills add` installs this policy layer only — the skills CLI copies files
+and cannot run install scripts. The runtime needs one more command, and both
+run from any directory:
+
+```bash
+npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-code
+~/.agents/skills/herdr-agent-team/harness/setup_harness.sh
+```
+
+Then `hteam check` and `hteam`. `-a pi claude-code` scopes the skill to the two
+runtimes the team supports; without it `npx skills` links every detected agent.
+`setup.md` (next to this file) is the guided procedure when the Human asks to
+install, configure, or repair the team: it covers the runtime choices, the
+install phase, and verification of the 55 installed artifacts.
 
 ## What is not included
 

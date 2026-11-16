@@ -129,9 +129,9 @@ expect "a clean pair stays on the standard tier" \
 expect "critical coder/reviewer collision uses the reviewer alternate" \
   '{"task_class":"feature","new_behavior":true,"risk":"high"}' \
   "model_independence.status" "alternate"
-expect "critical reviewer runs on a non-Claude model" \
+expect "critical reviewer alternates away from the writer's model" \
   '{"task_class":"feature","new_behavior":true,"risk":"high"}' \
-  "model_independence.alternate_models" '{"reviewer": {"model": "antigravity/claude-opus-4-6", "runtime": "pi"}}'
+  "model_independence.alternate_models" '{"reviewer": {"model": "fable", "runtime": "claude"}}'
 expect "standard W6 stays independent (reviewer runs claude haiku)" \
   '{"task_class":"bug-fix","structural_cleanup":true,"touches_behavior":true,"known_cause":true,"runnable_acceptance":true}' \
   "model_independence.status" "ok"

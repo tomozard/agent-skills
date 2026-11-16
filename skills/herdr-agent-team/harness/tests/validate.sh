@@ -18,6 +18,17 @@ fail() {
   exit 1
 }
 
+# Compile in memory: python -m py_compile writes __pycache__ next to the source,
+# which fails in sandboxed shells and dirties the skill directory that
+# `npx skills` owns.
+python_syntax_ok() {
+  python3 - "$1" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    compile(handle.read(), sys.argv[1], "exec")
+PY
+}
+
 # Reviewer and Tester carry shipped alternates for the writer/verifier
 # independence rule. Routing-exception and disabled-primary failover behavior is
 # exercised with these additional test-only alternates.
@@ -62,7 +73,7 @@ WORKFLOW_SHAPE_SRC="${HERDR_AGENT_TEAM_SCRIPTS:-$HOME/.agents/skills/herdr-agent
 [ -x bin/workflow-shape ] || fail "workflow-shape resolver is not executable"
 bash -n bin/workflow-shape || fail "workflow-shape shim syntax failed"
 [ -x "$WORKFLOW_SHAPE_SRC" ] || fail "workflow-shape: install agent-skills (npx skills add tomozard/agent-skills/skills/herdr-agent-team)"
-python3 -m py_compile "$WORKFLOW_SHAPE_SRC" || fail "workflow-shape Python syntax failed"
+python_syntax_ok "$WORKFLOW_SHAPE_SRC" || fail "workflow-shape Python syntax failed"
 [ -x tests/task-board.test.sh ] || fail "task-board tests are not executable"
 [ -x tests/micro-verification.test.sh ] || fail "micro verification tests are not executable"
 [ -x tests/workflow-shape.test.sh ] || fail "workflow shape tests are not executable"
@@ -70,13 +81,13 @@ python3 -m py_compile "$WORKFLOW_SHAPE_SRC" || fail "workflow-shape Python synta
 [ -x tests/herdr-app-spawn-role.test.sh ] || fail "herdr-app-spawn-role tests are not executable"
 [ -x tests/hteam.test.sh ] || fail "hteam tests are not executable"
 [ -x bin/hteam-dispatch ] || fail "hteam-dispatch is not executable"
-python3 -m py_compile bin/hteam-dispatch || fail "hteam-dispatch Python syntax failed"
+python_syntax_ok bin/hteam-dispatch || fail "hteam-dispatch Python syntax failed"
 grep -q 'does not staff' bin/hteam-dispatch || fail "hteam-dispatch does not gate unstaffed roles"
 [ -x tests/hteam-dispatch.test.sh ] || fail "hteam-dispatch tests are not executable"
 [ -x bin/hteam-config ] || fail "hteam-config CLI is not executable"
-python3 -m py_compile bin/hteam-config || fail "hteam-config Python syntax failed"
+python_syntax_ok bin/hteam-config || fail "hteam-config Python syntax failed"
 [ -x bin/clickup-status ] || fail "clickup-status CLI is not executable"
-python3 -m py_compile bin/clickup-status || fail "clickup-status Python syntax failed"
+python_syntax_ok bin/clickup-status || fail "clickup-status Python syntax failed"
 grep -q 'There is no intake loop here' bin/clickup-status \
   || fail "clickup-status must stay a status helper, not an intake loop"
 if grep -q 'add_parser("loop"\|add_parser("start"\|add_parser("stop"\|add_parser("once"' bin/clickup-status; then
@@ -90,7 +101,7 @@ if grep -q -- '--watch' bin/herdr-app-team; then
 fi
 bash -n bin/task-board || fail "task-board shim syntax failed"
 [ -x "$TASK_BOARD_SRC" ] || fail "task-board: install agent-skills (npx skills add tomozard/agent-skills/skills/herdr-agent-team)"
-python3 -m py_compile "$TASK_BOARD_SRC" || fail "task-board Python syntax failed"
+python_syntax_ok "$TASK_BOARD_SRC" || fail "task-board Python syntax failed"
 grep -q 'git.*rev-parse.*show-toplevel' "$TASK_BOARD_SRC" \
   || fail "task-board does not guard the full Git worktree"
 SKILL_ROOT="$(cd "$(dirname "$TASK_BOARD_SRC")/.." && pwd)"
@@ -2065,13 +2076,15 @@ team = json.loads(path.read_text())
 # Fixed PM must keep an enabled default while its shipped provider is disabled.
 team["roles"]["pm"]["models"] = {"claude": ["sonnet"]}
 team["roles"]["pm"]["default_model"] = "sonnet"
-# Disable OpenCode Go, and strip the coder's other alternates, so the coder case
-# below has no enabled alternate at all; the supervisor keeps its Claude
-# alternate and still fails over.
+# Disable OpenCode Go, and keep only disabled-provider alternates, so the coder
+# case below has no enabled alternate at all; the supervisor keeps its Claude
+# alternate and still fails over. Filtering by provider (not by one model name)
+# keeps this true when an enabled alternate is added to the shipped routes.
 team["disabled_model_providers"] = ["opencode-go"]
+disabled = set(team["disabled_model_providers"])
 team["roles"]["coder"]["routing"]["standard"]["alternates"] = [
     route for route in team["roles"]["coder"]["routing"]["standard"]["alternates"]
-    if route["model"] != "antigravity/gemini-3.8-flash"
+    if route["model"].split("/", 1)[0] in disabled
 ]
 path.write_text(json.dumps(team, indent=2) + "\n")
 PY

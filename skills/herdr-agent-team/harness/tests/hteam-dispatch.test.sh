@@ -11,7 +11,16 @@ trap 'rm -rf "$TMP"' EXIT
 fail() { echo "hteam-dispatch test: $*" >&2; exit 1; }
 ok()   { echo "  ok  $*"; }
 
-python3 -m py_compile "$DISPATCH" || fail "dispatch does not compile"
+# Compile in memory: python -m py_compile writes __pycache__ next to the source.
+python_syntax_ok() {
+  python3 - "$1" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    compile(handle.read(), sys.argv[1], "exec")
+PY
+}
+
+python_syntax_ok "$DISPATCH" || fail "dispatch does not compile"
 [ -x "$DISPATCH" ] || fail "hteam-dispatch is not executable"
 
 mkdir -p "$TMP/bin" "$TMP/state"
