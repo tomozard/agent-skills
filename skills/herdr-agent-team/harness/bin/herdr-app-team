@@ -185,7 +185,7 @@ if [ "$MODE" = "check" ]; then
     if [ -x "$REPO/bin/tts-thai.sh" ]; then
       echo "  ok:   voice: on (tts: $REPO/bin/tts-thai.sh — gTTS only)"
     else
-      echo "  warn: voice is on but $REPO/bin/tts-thai.sh is missing; speech falls back to macOS say" >&2
+      echo "  warn: voice is on but $REPO/bin/tts-thai.sh is missing; status speech stays silent until setup_harness.sh installs it" >&2
     fi
   else
     echo "  ok:   voice: off"

@@ -181,6 +181,23 @@ Two roles touch it, and only this way:
 `uninstall.sh` never deletes the vault. Full rules: phase 4 of [`setup.md`](setup.md)
 and [`roles/investigator.md`](references/roles/investigator.md).
 
+## Voice
+
+Status speech is off by default and enabled per launch: `hteam --voice on`
+(persisted with `hteam-config set voice on`). Exactly one Human-facing
+controller owns the voice — Orchestrator for startup, registry, global, handoff,
+and shutdown, or the PM that most recently received direct Human input.
+Background PMs, children, and agent-to-agent traffic stay silent. A `DONE`,
+`STUCK`, or `AWAITING_HUMAN_COMMIT` result is spoken as one short Thai outcome
+line with the next action; voice never reads the full chat, replaces the
+written answer, or approves anything.
+
+The engine is VoiceStudio `omnivoice` through `bin/tts-speak-omni`, with gTTS as
+the fallback when the backend is not running. There is no macOS `say` fallback:
+a machine with neither stays silent rather than speaking in a voice nobody
+chose. `hteam check` reports the effective mode; the profile and engine
+environment variables are in [`references/launcher.md`](references/launcher.md).
+
 ## Communication
 
 `references/communication-protocol.md` is the full contract: envelope, ACK /
@@ -250,6 +267,7 @@ install phase, and verification of the 55 installed artifacts.
 | where a role runs (space, tab, child terminal) | `references/placement.md` |
 | another agent CLI | `references/runtime-adapters.md` |
 | memory vault (opt-in, scoped read-only) | `setup.md` phase 4, `references/roles/investigator.md` |
+| voice (off by default, one speaker) | `references/launcher.md`, `references/roles/orchestrator.md` |
 
 ## Pitfalls
 

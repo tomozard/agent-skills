@@ -486,6 +486,9 @@ grep -q -- '--voice on|off' bin/herdr-team \
   || fail "herdr-team voice option is missing"
 grep -q 'VOICE_MODE=.*off' bin/herdr-team \
   || fail "herdr-team voice mode does not default to off"
+if grep -q 'falls back to macOS say' bin/herdr-app-team; then
+  fail "hteam check promises a macOS say fallback the policy forbids"
+fi
 grep -Fq 'ตรวจสอบ Workspace Registry เรียบร้อยแล้วค่ะ พบ {N} โปรเจกต์ กรุณาเลือกโปรเจกต์ที่ต้องการเปิดค่ะ' \
   bin/herdr-team || fail "startup voice outcome contract is missing from launcher prompt"
 grep -Fq 'ตรวจสอบ Workspace Registry เรียบร้อยแล้วค่ะ พบ {N} โปรเจกต์ กรุณาเลือกโปรเจกต์ที่ต้องการเปิดค่ะ' \
