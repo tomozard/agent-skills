@@ -1,0 +1,775 @@
+#!/usr/bin/env python3
+"""
+clickup-status — ClickUp status helpers for the Herdr desktop-app agent team.
+
+There is no intake loop here: the Human hands work to a PM directly, and this
+tool only keeps ClickUp in step with that work. `clickup-watch` remains as a
+deprecated alias.
+
+  clickup-status init      write a commented config file
+  clickup-status ask       post a PM question on a task and park it in discuss
+  clickup-status mark      advance a task/subtask status with a comment
+  clickup-status status    show the configuration and MCP login in use
+  clickup-status check     readiness only: config, list id, MCP login
+
+It uses the already-authenticated ClickUp MCP the Pi/Claude runtimes use, over
+plain HTTP — no personal API token.
+
+Ownership: only a task assigned to this agent's ClickUp user is writable, plus
+any task this helper already touched. Closing, rejecting, and release statuses
+stay with the Human.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
+HOME = Path.home()
+
+# Built-in defaults. Everything here can be set in the config file, and a
+# matching environment variable still wins for one-off runs.
+def default_state_dir() -> Path:
+    """New state dir, unless only the pre-rename one exists on this machine."""
+    base = HOME / ".local" / "state" / "herdr-app-team"
+    current, legacy = base / "clickup-status", base / "clickup-watch"
+    if not current.exists() and legacy.exists():
+        return legacy
+    return current
+
+
+DEFAULTS: Dict[str, Any] = {
+    "list_id": "",
+    "workspace_id": "",
+    "status": "to do",
+    "in_progress_status": "in progress",
+    "discuss_status": "discuss",
+    "ready_status": "ready",
+    "claim_assignee": "me",
+    "state_dir": str(default_state_dir()),
+    "mcp_url": "https://mcp.clickup.com/mcp",
+}
+ENV_FOR = {
+    "list_id": "CLICKUP_STATUS_LIST_ID",
+    "workspace_id": "CLICKUP_STATUS_WORKSPACE_ID",
+    "status": "CLICKUP_STATUS_STATUS",
+    "in_progress_status": "CLICKUP_STATUS_IN_PROGRESS_STATUS",
+    "discuss_status": "CLICKUP_STATUS_DISCUSS_STATUS",
+    "ready_status": "CLICKUP_STATUS_READY_STATUS",
+    "claim_assignee": "CLICKUP_STATUS_CLAIM_ASSIGNEE",
+    "state_dir": "CLICKUP_STATUS_STATE_DIR",
+    "mcp_url": "CLICKUP_MCP_URL",
+}
+# The pre-rename names keep working for one release.
+LEGACY_ENV = {
+    "list_id": "CLICKUP_WATCH_LIST_ID",
+    "workspace_id": "CLICKUP_WATCH_WORKSPACE_ID",
+    "status": "CLICKUP_WATCH_STATUS",
+    "in_progress_status": "CLICKUP_WATCH_IN_PROGRESS_STATUS",
+    "discuss_status": "CLICKUP_WATCH_DISCUSS_STATUS",
+    "ready_status": "CLICKUP_WATCH_READY_STATUS",
+    "claim_assignee": "CLICKUP_WATCH_CLAIM_ASSIGNEE",
+    "state_dir": "CLICKUP_WATCH_STATE_DIR",
+    "mcp_url": "CLICKUP_MCP_URL",
+}
+
+
+def config_path() -> Path:
+    override = os.environ.get("CLICKUP_STATUS_CONFIG") or os.environ.get("CLICKUP_WATCH_CONFIG", "")
+    if override:
+        return Path(override).expanduser()
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or (HOME / ".config")) / "herdr-team"
+    current, legacy = base / "clickup-status.yaml", base / "clickup-watch.yaml"
+    if not current.exists() and legacy.exists():
+        return legacy
+    return current
+
+
+CONFIG_FILE = config_path()
+
+# Resolved values (config file, then env, then defaults) — filled by apply_config().
+LIST_ID = str(DEFAULTS["list_id"])
+WORKSPACE_ID = str(DEFAULTS["workspace_id"])
+TRIGGER_STATUS = str(DEFAULTS["status"])
+IN_PROGRESS_STATUS = str(DEFAULTS["in_progress_status"])
+DISCUSS_STATUS = str(DEFAULTS["discuss_status"])
+READY_STATUS = str(DEFAULTS["ready_status"])
+CLAIM_ASSIGNEE = str(DEFAULTS["claim_assignee"])
+STATE_DIR = Path(str(DEFAULTS["state_dir"])).expanduser()
+MCP_URL = str(DEFAULTS["mcp_url"])
+
+
+def read_config(path: Optional[Path] = None) -> Dict[str, Any]:
+    """Config file values; an absent or unreadable file is not an error."""
+    target = path or CONFIG_FILE
+    if not target.is_file():
+        return {}
+    try:
+        import yaml  # noqa: PLC0415
+    except ImportError:
+        die("PyYAML is required to read the config file (pip install pyyaml)")
+    try:
+        data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError) as error:
+        die(f"cannot read config {target}: {error}")
+    if not isinstance(data, dict):
+        die(f"config {target} must be a mapping of keys to values")
+    return data
+
+
+def apply_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resolve config file → environment → defaults into the module globals."""
+    global LIST_ID, WORKSPACE_ID, TRIGGER_STATUS, IN_PROGRESS_STATUS, DISCUSS_STATUS
+    global READY_STATUS, CLAIM_ASSIGNEE, STATE_DIR, MCP_URL
+
+    file_values = read_config() if config is None else config
+    resolved: Dict[str, Any] = {}
+    for key, default in DEFAULTS.items():
+        # One-off environment override wins, then the config file, then the default.
+        value: Any = os.environ.get(ENV_FOR.get(key, ""), "")
+        if value in (None, ""):
+            value = os.environ.get(LEGACY_ENV.get(key, ""), "")
+        if value in (None, ""):
+            value = file_values.get(key)
+        if value in (None, ""):
+            value = default
+        resolved[key] = str(value).strip()
+
+    LIST_ID = resolved["list_id"]
+    WORKSPACE_ID = resolved["workspace_id"]
+    TRIGGER_STATUS = resolved["status"]
+    IN_PROGRESS_STATUS = resolved["in_progress_status"]
+    DISCUSS_STATUS = resolved["discuss_status"]
+    READY_STATUS = resolved["ready_status"]
+    CLAIM_ASSIGNEE = resolved["claim_assignee"]
+    STATE_DIR = Path(resolved["state_dir"]).expanduser()
+    MCP_URL = resolved["mcp_url"]
+    return resolved
+
+# ---------------------------------------------------------------------------
+# output + state
+# ---------------------------------------------------------------------------
+def now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+
+
+
+
+def say(message: str) -> None:
+    try:
+        print(message, flush=True)
+    except BrokenPipeError:  # e.g. piped into `head`
+        raise SystemExit(0)
+
+
+def log(message: str, **fields: Any) -> None:
+    entry = {"at": now(), "message": message, **fields}
+    line = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(STATE_DIR / "watch.log", "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+    detail = " ".join(f"{key}={value}" for key, value in fields.items() if value not in (None, ""))
+    say(f"[{entry['at']}] {message}" + (f" — {detail}" if detail else ""))
+
+
+def die(message: str, code: int = 1) -> "NoReturn":  # type: ignore[valid-type]
+    say(f"clickup-status: {message}")
+    raise SystemExit(code)
+
+
+def state_path() -> Path:
+    return STATE_DIR / "state.json"
+
+
+def empty_state() -> Dict[str, Any]:
+    return {"version": 1, "list_id": LIST_ID, "tasks": {}}
+
+
+def load_state() -> Dict[str, Any]:
+    """Read the ask/mark ledger; missing or unreadable means an empty ledger."""
+    try:
+        data = json.loads(state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty_state()
+    data.setdefault("tasks", {})
+    return data
+
+
+def save_state(state: Dict[str, Any]) -> None:
+    """Best-effort ledger write: a read-only workspace must not block ClickUp."""
+    path = state_path()
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                       encoding="utf-8")
+        tmp.replace(path)
+    except OSError as error:
+        say(f"clickup-status: warning: cannot write the local ledger ({error}); "
+            "the ClickUp update itself is unaffected")
+
+
+
+
+# ---------------------------------------------------------------------------
+# ClickUp MCP over streamable HTTP (reuses the runtime's OAuth login)
+# ---------------------------------------------------------------------------
+def token_files() -> Iterable[Path]:
+    override = os.environ.get("CLICKUP_MCP_TOKEN_FILE", "")
+    if override:
+        yield Path(override).expanduser()
+        return
+    root = Path(os.environ.get("CLICKUP_MCP_AUTH_DIR", str(HOME / ".mcp-auth"))).expanduser()
+    if not root.is_dir():
+        return
+    for path in sorted(root.glob("*/*_tokens.json")):
+        yield path
+
+
+def load_token() -> str:
+    inline = os.environ.get("CLICKUP_MCP_TOKEN", "").strip()
+    if inline:
+        return inline
+    best: Optional[Tuple[int, str]] = None
+    seen_any = False
+    for path in token_files():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        token = (data.get("access_token") or "").strip()
+        if not token:
+            continue
+        seen_any = True
+        if "clickup" not in str(data.get("issuer", "")).lower():
+            # mcp-remote keeps one store per package version; only the ClickUp
+            # one carries that issuer. Older stores have no issuer at all.
+            if data.get("issuer"):
+                continue
+        expires_at = data.get("expires_at") or 0
+        try:
+            expires_at = int(expires_at)
+        except (TypeError, ValueError):
+            expires_at = 0
+        if best is None or expires_at > best[0]:
+            best = (expires_at, token)
+    if best is None:
+        hint = "no ClickUp MCP login found — run: pi mcp login clickup" if not seen_any else \
+               "no ClickUp MCP token found — run: pi mcp login clickup"
+        die(hint)
+    return best[1]
+
+
+class Mcp:
+    def __init__(self) -> None:
+        self.token = load_token()
+        self.session: Optional[str] = None
+        self.next_id = 1
+        self.headers = {
+            "Authorization": "Bearer " + self.token,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        self._rpc("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "herdr-clickup-status", "version": "1"},
+        })
+        self._notify("notifications/initialized", {})
+
+    # -- transport -------------------------------------------------------
+    def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        data = json.dumps(payload).encode("utf-8")
+        headers = dict(self.headers)
+        if self.session:
+            headers["Mcp-Session-Id"] = self.session
+        request = urllib.request.Request(MCP_URL, data=data, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                session = response.headers.get("Mcp-Session-Id")
+                if session:
+                    self.session = session
+                content_type = response.headers.get("content-type", "")
+                body = response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as error:
+            detail = error.read()[:300].decode("utf-8", "replace")
+            if error.code in (401, 403):
+                die(f"ClickUp MCP rejected the token ({error.code}); run: pi mcp login clickup")
+            die(f"ClickUp MCP HTTP {error.code}: {detail}")
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            die(f"ClickUp MCP unreachable: {error}")
+        if not body.strip():
+            return {}
+        if "text/event-stream" in content_type:
+            for line in body.splitlines():
+                if line.startswith("data:"):
+                    chunk = line[5:].strip()
+                    if chunk:
+                        return json.loads(chunk)
+            die("ClickUp MCP returned an empty event stream")
+        return json.loads(body)
+
+    def _rpc(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        request_id = self.next_id
+        self.next_id += 1
+        response = self._post({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        if "error" in response:
+            die(f"ClickUp MCP {method} failed: {json.dumps(response['error'])[:300]}")
+        return response.get("result") or {}
+
+    def _notify(self, method: str, params: Dict[str, Any]) -> None:
+        try:
+            self._post({"jsonrpc": "2.0", "method": method, "params": params})
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+
+    # -- tools -----------------------------------------------------------
+    def call(self, name: str, arguments: Dict[str, Any]) -> Any:
+        result = self._rpc("tools/call", {"name": name, "arguments": arguments})
+        if result.get("isError"):
+            die(f"ClickUp {name} failed: {json.dumps(result)[:300]}")
+        structured = result.get("structuredContent")
+        if structured is not None:
+            return structured
+        for item in result.get("content") or []:
+            if item.get("type") == "text":
+                try:
+                    return json.loads(item.get("text") or "{}")
+                except ValueError:
+                    return {"text": item.get("text")}
+        return {}
+
+    def list_tasks(self, list_id: str, statuses: List[str], page: int = 0) -> Dict[str, Any]:
+        arguments: Dict[str, Any] = {
+            "list_ids": [list_id],
+            "statuses": statuses,
+            "include_closed": False,
+            "subtasks": True,
+            "order_by": "updated",
+            "reverse": False,
+            "page": page,
+            "fields": ["status", "priority", "tags", "assignees", "date_updated"],
+            "workspace_id": WORKSPACE_ID,
+        }
+        return self.call("clickup_filter_tasks", arguments)
+
+    def get_task(self, task_id: str) -> Dict[str, Any]:
+        return self.call("clickup_get_task", {
+            "task_id": task_id,
+            "include": ["description"],
+            "workspace_id": WORKSPACE_ID,
+        })
+
+    def set_status(self, task_id: str, status: str) -> None:
+        self.call("clickup_update_task", {
+            "task_id": task_id, "status": status, "workspace_id": WORKSPACE_ID,
+        })
+
+    def resolve_assignee(self, who: str) -> str:
+        """'me' / name / email → numeric ClickUp user id (update_task needs ids)."""
+        if who.isdigit():
+            return who
+        if getattr(self, "_assignee_cache", None) is None:
+            self._assignee_cache = {}
+        if who in self._assignee_cache:
+            return self._assignee_cache[who]
+        payload = self.call("clickup_resolve_assignees", {
+            "assignees": [who], "workspace_id": WORKSPACE_ID,
+        })
+        resolved = ""
+        ids = payload.get("userIds") if isinstance(payload, dict) else None
+        if ids:
+            resolved = str(ids[0])
+        for item in (payload.get("resolved") or payload.get("assignees") or []) if isinstance(payload, dict) else []:
+            if resolved:
+                break
+            if isinstance(item, dict) and item.get("id"):
+                resolved = str(item["id"])
+                break
+        self._assignee_cache[who] = resolved
+        return resolved
+
+    def comment(self, task_id: str, text: str) -> None:
+        self.call("clickup_create_task_comment", {
+            "task_id": task_id, "comment_text": text, "workspace_id": WORKSPACE_ID,
+        })
+
+    def human_replies(self, task_id: str, limit: int = 5) -> List[Tuple[str, str, str]]:
+        """Comments written by a person (not this agent), oldest first."""
+        payload = self.call("clickup_get_task_comments", {
+            "task_id": task_id, "workspace_id": WORKSPACE_ID,
+        })
+        me = self.resolve_assignee(CLAIM_ASSIGNEE) if CLAIM_ASSIGNEE else ""
+        replies: List[Tuple[str, str, str]] = []
+        for item in payload.get("comments") or []:
+            user = item.get("user") or {}
+            if me and str(user.get("id") or "") == me:
+                continue
+            text = (item.get("comment_text") or "").strip()
+            if not text:
+                continue
+            replies.append((str(item.get("date") or ""), str(user.get("username") or "human"), text))
+        replies.sort(key=lambda row: (len(row[0]), row[0]))
+        return replies[-limit:]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+CONFIG_TEMPLATE = """\
+# clickup-status — ClickUp status helpers for the Herdr desktop-app agent team.
+# There is no polling loop: the Human hands work to a PM directly.
+# Precedence: environment variable > this file > built-in default.
+
+# Workspace id from the ClickUp URL: app.clickup.com/<workspace_id>/...
+workspace_id: "{workspace_id}"
+
+# Optional: one list id to scope the helpers. Empty = any list the task is on.
+list_id: "{list_id}"
+
+# The status a parked question waits in, and the statuses PM may write.
+status: "{status}"
+in_progress_status: "{in_progress_status}"
+discuss_status: "{discuss_status}"
+ready_status: "{ready_status}"
+
+# Ownership: only a task assigned to this ClickUp user is writable.
+# "me" = the user behind the MCP login; a numeric id or an email also works.
+claim_assignee: "{claim_assignee}"
+
+# Small ask/mark ledger.
+state_dir: "{state_dir}"
+
+mcp_url: "{mcp_url}"
+"""
+
+
+def ensure_config(force: bool = False) -> Path:
+    """Write the commented default config when it is missing."""
+    target = CONFIG_FILE
+    if target.exists() and not force:
+        return target
+    values = dict(DEFAULTS)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(CONFIG_TEMPLATE.format(**values), encoding="utf-8")
+    return target
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    target = CONFIG_FILE
+    existed = target.exists()
+    if existed and not args.force:
+        say(f"clickup-status: config already exists: {target}")
+        say("  edit it there, or pass --force to overwrite with defaults")
+        return 0
+    ensure_config(force=True)
+    say(f"clickup-status: wrote {target}" + (" (overwrote)" if existed else ""))
+    say("  edit list_id / statuses there — there is no poll loop to restart")
+    return 0
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    """PM → ClickUp: record a question and move the task to `discuss`."""
+    state = load_state()
+    record = state["tasks"].get(args.task)
+    owned = record is not None
+    mcp: Optional[Mcp] = None
+    if not owned and args.force:
+        owned = True
+    if not owned:
+        mcp = Mcp()
+        detail = mcp.get_task(args.task)
+        owners = {str(a.get("id") if isinstance(a, dict) else a)
+                  for a in (detail.get("assignees") or [])}
+        me = mcp.resolve_assignee(CLAIM_ASSIGNEE) if CLAIM_ASSIGNEE else ""
+        owned = bool(me and me in owners)
+    if not owned:
+        die(f"{args.task} is not assigned to {CLAIM_ASSIGNEE or 'this agent'}; "
+            "refusing to move it (use --force only if you really mean it)")
+    record = record or {}
+
+    text = ""
+    if args.comment_file:
+        path = Path(args.comment_file).expanduser()
+        if not path.is_file():
+            die(f"comment file not readable: {path}")
+        text = path.read_text(encoding="utf-8").strip()
+    elif args.text:
+        text = args.text.strip()
+    if not text:
+        die("ask needs --text or --comment-file")
+
+    body = "\n".join([
+        "[herdr-team] มีคำถามก่อนดำเนินการต่อค่ะ",
+        text,
+        "",
+        f"ตอบกลับได้ที่ comment นี้ แล้วเปลี่ยนสถานะกลับเป็น \"{TRIGGER_STATUS}\" "
+        "จากนั้นแจ้ง PM อีกครั้งเพื่อทำงานต่อค่ะ",
+    ])
+    if args.dry_run:
+        say(f"would comment on {args.task}:\n{body}")
+        say(f"would set status: {DISCUSS_STATUS}")
+        return 0
+
+    mcp = mcp or Mcp()
+    mcp.comment(args.task, body)
+    mcp.set_status(args.task, DISCUSS_STATUS)
+    record.update({"outcome": "awaiting_human", "asked_at": now(), "question": text[:300]})
+    state["tasks"][args.task] = record
+    save_state(state)
+    log("asked", task=args.task, status=DISCUSS_STATUS)
+    say(f"clickup-status: question posted on {args.task}; status is now '{DISCUSS_STATUS}'")
+    say("  the Human answers in ClickUp and moves it back to "
+        f"'{TRIGGER_STATUS}' — continue the task once the answer is in")
+    return 0
+
+
+MARK_LABEL = {
+    "in progress": "กำลังดำเนินการ",
+    "discuss": "ต้องการข้อมูล/คำตอบจากคุณ",
+    "ready": "งานเสร็จแล้ว รอตรวจ/อนุมัติจากคุณ",
+}
+
+
+def mark_statuses() -> Dict[str, str]:
+    """Statuses the agent may write, keyed by the name it is asked for."""
+    return {"in progress": IN_PROGRESS_STATUS, "discuss": DISCUSS_STATUS,
+            "ready": READY_STATUS}
+
+
+def cmd_mark(args: argparse.Namespace) -> int:
+    """PM → ClickUp: advance a task's status with a comment.
+
+    PM owns status hygiene; Workers never touch ClickUp. Only the statuses that
+    describe team progress are writable here — closing, rejecting, and release
+    statuses stay with the Human.
+    """
+    allowed_statuses = mark_statuses()
+    wanted = " ".join(args.status.strip().lower().split())
+    if wanted not in allowed_statuses:
+        die(f"status '{args.status}' is not writable by the agent "
+            f"(allowed: {', '.join(sorted(allowed_statuses))})")
+    text = ""
+    if args.comment_file:
+        path = Path(args.comment_file).expanduser()
+        if not path.is_file():
+            die(f"comment file not readable: {path}")
+        text = path.read_text(encoding="utf-8").strip()
+    elif args.text:
+        text = args.text.strip()
+
+    state = load_state()
+    record = state["tasks"].get(args.task)
+    allowed = record is not None
+    mcp: Optional[Mcp] = None
+    if not allowed and args.force:
+        allowed = True
+    if not allowed:
+        # A subtask is not tracked in the ledger, so accept one this agent already
+        # owns instead of demanding --force on every checklist tick.
+        mcp = Mcp()
+        detail = mcp.get_task(args.task)
+        owners = {str(a.get("id") if isinstance(a, dict) else a)
+                  for a in (detail.get("assignees") or [])}
+        me = mcp.resolve_assignee(CLAIM_ASSIGNEE) if CLAIM_ASSIGNEE else ""
+        allowed = bool(me and me in owners)
+    if not allowed:
+        die(f"{args.task} is not owned by this agent and is not assigned to "
+            f"{CLAIM_ASSIGNEE or 'this agent'}; refusing to change it")
+
+    body = f"[herdr-team] {MARK_LABEL.get(wanted, wanted)}"
+    if text:
+        body += "\n" + text
+
+    if args.dry_run:
+        say(f"would comment on {args.task}:\n{body}")
+        say(f"would set status: {allowed_statuses[wanted]}")
+        return 0
+
+    mcp = mcp or Mcp()
+    mcp.comment(args.task, body)
+    mcp.set_status(args.task, allowed_statuses[wanted])
+    if record is not None:
+        record["last_mark"] = {"status": allowed_statuses[wanted], "at": now()}
+        if wanted == "discuss":
+            record["outcome"] = "awaiting_human"
+        elif wanted == "ready":
+            record["outcome"] = "ready"
+        state["tasks"][args.task] = record
+        save_state(state)
+    log("marked", task=args.task, status=allowed_statuses[wanted])
+    say(f"clickup-status: {args.task} → '{allowed_statuses[wanted]}'")
+    return 0
+
+
+def cmd_check(_args: argparse.Namespace) -> int:
+    """Readiness only: no network, no writes."""
+    problems = 0
+    if CONFIG_FILE.is_file():
+        say(f"  ok:   config: {CONFIG_FILE}")
+    else:
+        say(f"  note: no config file yet ({CONFIG_FILE}) — defaults in use; run: clickup-status init")
+    if LIST_ID and not LIST_ID.isdigit():
+        say(f"  MISS: list_id must be a ClickUp list id (got '{LIST_ID}')")
+        problems += 1
+    try:
+        load_token()
+        say("  ok:   ClickUp MCP login found")
+    except SystemExit:
+        say("  MISS: ClickUp MCP login — run: pi mcp login clickup")
+        problems += 1
+    say(f"  ok:   statuses: '{TRIGGER_STATUS}' -> '{IN_PROGRESS_STATUS}', "
+        f"discuss '{DISCUSS_STATUS}', ready '{READY_STATUS}'")
+    return 0 if problems == 0 else 1
+
+
+
+
+def cmd_status(_args: argparse.Namespace) -> int:
+    say(f"config:      {CONFIG_FILE}" + ("" if CONFIG_FILE.is_file() else " (missing — defaults in use)"))
+    say(f"workspace:   {WORKSPACE_ID or '-'}")
+    say(f"list:        {LIST_ID or '-'}")
+    say(f"statuses:    '{TRIGGER_STATUS}' -> '{IN_PROGRESS_STATUS}', "
+        f"discuss '{DISCUSS_STATUS}', ready '{READY_STATUS}'")
+    say(f"claim:       {CLAIM_ASSIGNEE or 'none'}")
+    try:
+        load_token()
+        say("mcp token:   found")
+    except SystemExit:
+        say("mcp token:   MISSING (run: pi mcp login clickup)")
+    return 0
+
+
+
+
+# ---------------------------------------------------------------------------
+# cli
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="clickup-status", description=__doc__.splitlines()[0])
+    parser.add_argument("--config", help=f"config file (default: {CONFIG_FILE})")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    init = sub.add_parser("init", help="write the config file with commented defaults")
+    init.add_argument("--force", action="store_true", help="overwrite an existing config file")
+    init.set_defaults(func=cmd_init)
+
+    ask = sub.add_parser("ask", help="record a PM question on the ClickUp task and park it in discuss")
+    ask.add_argument("--task", required=True, help="ClickUp task id")
+    ask.add_argument("--text", help="question text")
+    ask.add_argument("--comment-file", help="file holding the question (preferred for long text)")
+    ask.add_argument("--force", action="store_true", help="allow a task this agent does not own")
+    ask.add_argument("--dry-run", action="store_true", help="print the comment without writing")
+    ask.set_defaults(func=cmd_ask)
+
+    mark = sub.add_parser("mark", help="advance a task/subtask status with a comment (PM-owned)")
+    mark.add_argument("--task", required=True, help="ClickUp task or subtask id")
+    mark.add_argument("--status", required=True,
+                      help="in progress | discuss | ready (closing statuses stay with the Human)")
+    mark.add_argument("--text", help="short note for the comment")
+    mark.add_argument("--comment-file", help="file holding the note (preferred for long text)")
+    mark.add_argument("--force", action="store_true", help="allow a task this agent does not own")
+    mark.add_argument("--dry-run", action="store_true", help="print the change without writing")
+    mark.set_defaults(func=cmd_mark)
+
+    status = sub.add_parser("status", help="show the configuration and MCP login in use")
+    status.set_defaults(func=cmd_status)
+
+    check = sub.add_parser("check", help="readiness only: config, list id, MCP login")
+    check.set_defaults(func=cmd_check)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    global CONFIG_FILE
+    args = build_parser().parse_args(argv)
+    if getattr(args, "config", None):
+        CONFIG_FILE = Path(args.config).expanduser()
+    apply_config()
+    try:
+        return int(args.func(args) or 0)
+    except SystemExit as error:
+        return int(error.code or 0)
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -394,7 +394,6 @@ therefore has its own entry point for it:
 ```bash
 hteam                       # start (or reuse) the Orchestrator in the app window
 hteam check                 # validate prerequisites only
-hteam --watch on            # also run the ClickUp intake watcher (default: off)
 hteam --voice on            # speak short Thai status from Orchestrator and PM
 ~/bin/herdr-app-spawn-role <role> <brief-file> --project <slug> --controller <tN>
 ```
@@ -469,163 +468,37 @@ Environment overrides when the checkout or registry live elsewhere:
 Both launchers also auto-discover the repo from their own location when the
 default `~/Workspaces/project-scaffold` is absent.
 
-## ClickUp Intake (`clickup-watch`)
+## ClickUp status helpers (`clickup-status`)
 
-The desktop-app team can pull work from ClickUp instead of waiting for a Human
-message. `bin/clickup-watch` is a plain polling loop — **not an agent**, so a
-poll costs no model tokens — and it lives with the team: `hteam` starts it in
-its own tab in the control space and it stops when the team stops. It follows
-the project harness: every 30 minutes it visits the ClickUp lists of the
-projects whose registry entry opts in, and nothing else.
+`bin/clickup-status` is a Human-run helper — **not** an agent and **not** an
+intake loop. It never polls a list, never finds work, never assigns a task, and
+never touches a repository or Git. Work reaches a PM because the Human hands it
+over in the PM pane.
 
 ```bash
-clickup-watch status          # list, tag, trigger status, watcher pane, last poll/dispatch
-clickup-watch check           # config + registry + ClickUp MCP login + herdr-core, no network
-clickup-watch init            # write the config file with commented defaults
-clickup-watch once            # one poll now (--dry-run to look without touching ClickUp)
-clickup-watch start | stop    # start or stop the kept watcher pane
-clickup-watch loop            # foreground loop, --interval N (default 600s)
+clickup-status init            # write ~/.config/herdr-team/clickup-status.yaml
+clickup-status status          # config, list id and MCP login in use
+clickup-status check           # readiness only: no network, no writes
+clickup-status ask  --task <id> --text "คำถามสั้น ๆ"   # or --comment-file FILE
+clickup-status mark --task <id> --status "in progress|discuss|ready" --text "..."
 ```
 
-What one poll does:
+`ask` writes a `[herdr-team]` comment and parks the task in `discuss`; the Human
+answers in ClickUp and continues in the PM pane. `mark` advances a status with a
+comment and accepts only the three statuses that describe team progress —
+closing, rejecting, merging, and releasing stay with the Human.
 
-1. Picks its targets from the project harness registry: every project whose
-   entry sets `clickup: { auto_intake: true }`, on each of the ClickUp lists
-   registered for it (a project may have several). A project without that flag
-   is never polled at all.
-2. Reads tasks in the trigger status (default `to do`) **that carry the opt-in
-   tag** (default `agent-team`) **and are assigned to this agent's own ClickUp
-   user** (default `me`), over the **ClickUp MCP** the runtimes already use, with
-   the stored OAuth login — no personal API token. The lists are usually shared
-   with people, and each herdr-team user has their own ClickUp account, so a task
-   that lacks the tag or belongs to someone else is never read further,
-   commented on, moved, or assigned.
-3. Resolves the project from the list it came from, so nothing is guessed. A
-   `project: <slug>` line in the task description still overrides the list's
-   project, which is how one list can feed two projects.
-4. Resolves the pane by the same naming the spawner uses — registry
-   `ap-intranet` → tab `pm-ap_intranet` → that PM's terminal. A bare `pm` pane
-   belongs to another project and is never used.
-5. Delivers a brief (English, file-first) to the PM: the task text verbatim, the
-   project and its repos, and the dispatch policy. The brief grants **no**
-   authority — PM still puts its plan, `Allowed files`, work branch, and the
-   "wait at the commit gate or `AUTO_COMMIT`" question to the Human and starts
-   only after approval.
-6. Claims the task visibly: assigns it to the agent's ClickUp user (so people
-   see it is taken), writes `in progress`, and adds a Thai `[herdr-team]`
-   comment naming the project and receiving pane. An assignee a person already
-   holds is never replaced — the claim is skipped and logged instead.
-7. Watches its own claims: a task still `in progress` with no ClickUp activity
-   (`date_updated` unchanged) for `stale_hours` (default 8, 0 disables) is
-   commented and parked in `discuss` — that is how a dead pane or a forgotten
-   task comes back to the Human instead of hanging forever.
+Ownership: a task is writable only when it is assigned to this agent's ClickUp
+user (`claim_assignee`, default `me`). A task a person already holds is left
+alone. Workers never touch ClickUp; PM owns the status once the Human hands the
+task over.
 
-### Questions go back to ClickUp
-
-The loop is two-way, so nobody has to sit in a pane watching for a question:
-
-```bash
-clickup-watch ask --task <id> --text "คำถามสั้น ๆ"      # or --comment-file FILE
-```
-
-That writes a Thai `[herdr-team]` comment and moves the task from
-`in progress` to `discuss`. The Human answers on the task and moves it back to
-`to do`; the next poll re-dispatches it and quotes those answers in the brief, so
-PM continues instead of asking again. `ask` only touches tasks this watcher
-dispatched, and it is the only ClickUp write an agent may make.
-
-### Who owns the ClickUp status
-
-Silent tasks are the usual failure, so the ownership is explicit:
-
-| Transition | Owner | How |
-|---|---|---|
-| `to do` → `in progress` | watcher | automatic on handoff |
-| `to do` → `discuss` | watcher | ambiguous project, or no activity after `stale_hours` |
-| `in progress` → `discuss` | PM | `clickup-watch ask` (question) or `mark --status discuss` (blocker) |
-| `in progress` → `ready` | PM | `clickup-watch mark --task <id> --status ready --text "..."` |
-| subtask → `ready` | PM | same command with the subtask id |
-| `discuss` → `to do` | Human | after answering |
-| `done` / `reject` / `complete` | Human | never the agent |
-
-```bash
-clickup-watch mark --task <id> --status ready --text "แก้ครบ 12 กลุ่ม, verifier ผ่าน"
-clickup-watch mark --task <subtask-id> --status ready      # tick a checklist item
-```
-
-`mark` accepts only `in progress`, `discuss`, and `ready`; closing statuses are
-refused. It works on tracked tasks and on any task already assigned to the
-agent's user (so subtasks work without `--force`), and always writes a
-`[herdr-team]` comment naming the change.
-
-### Turning auto intake on for one project
-
-Auto intake is off for every project until its registry entry says otherwise, so
-nothing is polled by default. Add one key under that project's `clickup:` block:
-
-```yaml
-projects:
-  ap-intranet:
-    clickup:
-      list_id: '901615751336'
-      auto_intake: true      # ← this project's lists are polled every 30 minutes
-```
-
-A project with several lists (for example `crm-mobile` with three under
-`clickup.lists:`) needs the flag once — all of its lists are polled. Remove the
-key to stop intake for that project. Restart the watcher after editing the
-registry (`clickup-watch stop && clickup-watch start`) and confirm with
-`clickup-watch status`, which lists every enabled project and its list ids.
-
-Unresolved and unstaffed tasks never disappear:
-
-| Situation | ClickUp result |
-|---|---|
-| Project not enabled in the registry | not polled at all |
-| No opt-in tag | untouched: no comment, no status change, no assignee |
-| Tagged but assigned to another herdr-team user | untouched: another instance's watcher owns it |
-| Project resolved, PM live | assigned to the agent user, `in progress`, comment naming the PM pane |
-| Project resolved, no PM | stays `to do`; the Orchestrator is asked once per 30 min to open the project's PM, then the brief follows |
-| Project not resolved | `discuss` + comment saying what is missing and the closest candidates |
-| No PM and no Orchestrator pane | untouched, logged; retried next poll |
-
-`clickup-watch` never closes, approves, or re-prioritises a task, never writes to
-Git, and never sends to a Worker pane.
-
-Configuration lives in a file, not in the environment:
-
-```bash
-clickup-watch init                      # write ~/.config/herdr-team/clickup-watch.yaml
-$EDITOR ~/.config/herdr-team/clickup-watch.yaml
-clickup-watch stop && clickup-watch start    # apply
-```
-
-`~/.config/herdr-team/clickup-watch.yaml` (override the location with
-`--config PATH` or `CLICKUP_WATCH_CONFIG`) holds `list_id` (empty = follow the
-registry; set it to watch one list), `workspace_id`, `status`, `require_tag`,
-`require_assignee`, `claim_assignee`, `in_progress_status`, `discuss_status`,
-`interval` (1800 = 30 minutes), `max_tasks`, `orch_retry_seconds`, `project`,
-`registry`, `state_dir`, `terminal_name`, `team_space`, `herdr_core`, and
-`mcp_url`; the file carries a comment per key.
-Precedence is one-off flag >
-environment variable > config file > built-in default, so `CLICKUP_WATCH_*`
-variables still work for a single run without editing the file.
-`clickup-watch check` and `clickup-watch status` print the config path and the
-values actually in force.
-Disable or enable intake for a session with `hteam --watch off|on` (the default
-is off) or `HERDR_TEAM_WATCH=0|1`; the per-machine default lives in
-`hteam.yaml` as `watch: on|off`.
-
-State and audit trail: `~/.local/state/herdr-app-team/clickup-watch/` — `state.json`,
-`briefs/`, and `watch.log`. If the MCP login expires, run `pi mcp login clickup`;
-`clickup-watch check` reports it. Note when editing: the MCP tool
-`clickup_get_task` accepts only these `include` values — `attachments`,
-`checklists`, `custom_fields`, `dependencies`, `description`, `git_links`,
-`linked_tasks`, `subtasks`, `watchers`; asking for `status` or `url` there is an
-error, and status/url already come from the list query. Likewise
-`clickup_update_task` needs numeric assignee ids: resolve `me`/names with
-`clickup_resolve_assignees` (it returns `userIds`) instead of passing them
-straight through.
+There is no `auto_intake` registry setting and no polling interval: a project
+does not need a ClickUp entry for the team to work on it, and no state survives
+in `~/.local/state/herdr-app-team/clickup-status/` except the small ask/mark
+ledger. The old `clickup-watch` command, config file, and `CLICKUP_WATCH_*` env
+names still work as deprecated aliases. If the MCP login expires, run
+`pi mcp login clickup`; `clickup-status check` reports it.
 
 ## Spawn a Project Agent
 

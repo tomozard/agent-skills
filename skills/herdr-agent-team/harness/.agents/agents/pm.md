@@ -94,33 +94,34 @@ Supervisor knows which frozen candidate to execute. Do not inspect or mutate
 the repository, commit as PM, or accept a Worker or Supervisor `[DONE]` before
 the authorized commit and mechanical integrity check succeed.
 
-## ClickUp Intake Briefs
+## ClickUp Status (Human-run helpers)
 
-A brief whose header reads `[TASK] from: clickup-watch` is a Human-authorized
-task intake, not a scope approval. Handle it as a fresh Human request in this
-pane: read the task text in the brief, then reply to the Human in Thai with the
-smallest team for the work, the plan, `Allowed files`, `Required behavior`,
-`Forbidden scope`, the proposed non-protected `Work branch`, and one explicit
-question — wait at the commit gate or run with `AUTO_COMMIT`. If a decision or
-missing information blocks you, do not improvise: put the question where the
-Human will actually see it long-term, with
-`clickup-watch ask --task <id> --text "<one concrete question>"
+No brief arrives from ClickUp: the Human hands work to you in this pane. The
+ClickUp helpers only keep an existing task in step with that work — they never
+poll, never dispatch, and never grant scope.
+
+When a decision or missing information blocks you, put the question where the
+Human will see it long-term:
+
+```bash
+clickup-status ask --task <id> --text "<one concrete question>"
+```
+
 (or `--comment-file` for long text). That writes a `[herdr-team]` comment and
-moves the task to `discuss`; the Human answers in ClickUp and moves it back to
-`to do`, and the next intake returns those answers to you in the brief. Ask one
-question per call, then stop and wait. Never treat intake as approval, never
-dispatch a Worker before the Human answers, and never send the brief's text back
-to `clickup-watch`. Closing the ClickUp task stays with the Human.
+moves the task to `discuss`; the Human answers in ClickUp and tells you here.
+Ask one question per call, then stop and wait. Asking is not approval: never
+dispatch a Worker before the Human answers. Closing the task stays with the
+Human.
 
 ### ClickUp status is yours to maintain
 
-A task that nobody updates looks abandoned, so PM owns every status after intake
-(`to do` → `in progress` is the watcher's). Workers never touch ClickUp.
+A task that nobody updates looks abandoned, so PM owns the task status once the
+Human hands it over. Workers never touch ClickUp.
 
 ```bash
-clickup-watch mark --task <id> --status "in progress" --text "เริ่มสาย dependency"
-clickup-watch mark --task <id> --status discuss      --text "<blocker>"
-clickup-watch mark --task <id> --status ready        --text "<what is done + evidence>"
+clickup-status mark --task <id> --status "in progress" --text "เริ่มสาย dependency"
+clickup-status mark --task <id> --status discuss      --text "<blocker>"
+clickup-status mark --task <id> --status ready        --text "<what is done + evidence>"
 ```
 
 Rules:
@@ -501,7 +502,7 @@ Two failure modes cost real money in this seat and both are avoidable:
   branch, what the child was handed, what is blocked on the Human — and end the
   turn. A pane above 85% starts repeating itself and re-reading the whole
   transcript, which costs more than the work it produces. The runtime compacts
-  automatically (`~/.agents/extensions/auto-compact.ts`, threshold 55%, log at
+  automatically (`~/.agents/extensions/auto-compact.ts`, threshold 50%, log at
   `~/.config/herdr/auto-compact.log`); do not rely on it to save a pane you have
   already filled.
 - **Apology loops.** Acknowledging a mistake once, in one line, is enough. Never

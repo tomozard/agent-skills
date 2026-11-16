@@ -66,7 +66,7 @@ python3 -m py_compile "$WORKFLOW_SHAPE_SRC" || fail "workflow-shape Python synta
 [ -x tests/task-board.test.sh ] || fail "task-board tests are not executable"
 [ -x tests/micro-verification.test.sh ] || fail "micro verification tests are not executable"
 [ -x tests/workflow-shape.test.sh ] || fail "workflow shape tests are not executable"
-[ -x tests/clickup-watch.test.sh ] || fail "ClickUp watcher tests are not executable"
+[ -x tests/clickup-status.test.sh ] || fail "ClickUp status tests are not executable"
 [ -x tests/herdr-app-spawn-role.test.sh ] || fail "herdr-app-spawn-role tests are not executable"
 [ -x tests/hteam.test.sh ] || fail "hteam tests are not executable"
 [ -x bin/hteam-dispatch ] || fail "hteam-dispatch is not executable"
@@ -75,17 +75,29 @@ grep -q 'does not staff' bin/hteam-dispatch || fail "hteam-dispatch does not gat
 [ -x tests/hteam-dispatch.test.sh ] || fail "hteam-dispatch tests are not executable"
 [ -x bin/hteam-config ] || fail "hteam-config CLI is not executable"
 python3 -m py_compile bin/hteam-config || fail "hteam-config Python syntax failed"
-[ -x bin/clickup-watch ] || fail "clickup-watch CLI is not executable"
-python3 -m py_compile bin/clickup-watch || fail "clickup-watch Python syntax failed"
-grep -q 'pre-authorizes nothing' bin/clickup-watch \
-  || fail "the intake brief must withhold all authority"
-grep -q 'pm-{runtime_slug' bin/clickup-watch \
-  || fail "clickup-watch must map projects to the runtime PM tab label"
+[ -x bin/clickup-status ] || fail "clickup-status CLI is not executable"
+python3 -m py_compile bin/clickup-status || fail "clickup-status Python syntax failed"
+[ -x bin/clickup-watch ] || fail "the deprecated clickup-watch alias is not executable"
+grep -q 'There is no intake loop here' bin/clickup-status \
+  || fail "clickup-watch must stay a status helper, not an intake loop"
+if grep -q 'add_parser("loop"\|add_parser("start"\|add_parser("stop"\|add_parser("once"' bin/clickup-status; then
+  fail "clickup-status still offers the removed intake loop"
+fi
+if grep -q -- '--watch' bin/herdr-app-team; then
+  fail "the launcher still offers the removed intake watcher flag"
+fi
 bash -n bin/task-board || fail "task-board shim syntax failed"
 [ -x "$TASK_BOARD_SRC" ] || fail "task-board: install agent-skills (npx skills add tomozard/agent-skills/skills/herdr-agent-team)"
 python3 -m py_compile "$TASK_BOARD_SRC" || fail "task-board Python syntax failed"
 grep -q 'git.*rev-parse.*show-toplevel' "$TASK_BOARD_SRC" \
   || fail "task-board does not guard the full Git worktree"
+SKILL_ROOT="$(cd "$(dirname "$TASK_BOARD_SRC")/.." && pwd)"
+[ -f "$SKILL_ROOT/references/launcher.md" ] \
+  || fail "the installed skill is missing references/launcher.md"
+[ -f "$SKILL_ROOT/references/placement.md" ] \
+  || fail "the installed skill is missing references/placement.md"
+grep -q 'references/launcher.md' "$SKILL_ROOT/SKILL.md" \
+  || fail "SKILL.md does not route to the launcher reference"
 grep -q 'HERDR_PROJECT=' bin/spawn-agent \
   || fail "spawn-agent does not propagate project context"
 grep -q '_agent_task_board_event.*DONE' .agents/skills/agent-shared/lib/agent-helpers.sh \
@@ -3087,7 +3099,7 @@ HOME="$TMP/uninstall-home" ./uninstall.sh --check >/dev/null \
 bash tests/task-board.test.sh || fail "task-board tests failed"
 bash tests/micro-verification.test.sh || fail "micro verification tests failed"
 bash tests/workflow-shape.test.sh || fail "workflow shape tests failed"
-bash tests/clickup-watch.test.sh || fail "clickup-watch tests failed"
+bash tests/clickup-status.test.sh || fail "clickup-status tests failed"
 bash tests/herdr-app-spawn-role.test.sh || fail "herdr-app-spawn-role tests failed"
 bash tests/hteam.test.sh || fail "hteam tests failed"
 bash tests/hteam-dispatch.test.sh || fail "hteam-dispatch tests failed"

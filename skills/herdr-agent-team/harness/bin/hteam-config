@@ -25,15 +25,14 @@ KEYS = {
     "space": ("HERDR_TEAM_SPACE", lambda d: "Herdr Team"),
     "folder": ("HERDR_TEAM_CWD", lambda d: str(Path.home() / "Workspaces")),
     "voice": ("HERDR_VOICE_MODE", lambda d: "off"),
-    "watch": ("HERDR_TEAM_WATCH", lambda d: "off"),
     "repo": ("HERDR_TEAM_REPO", lambda d: detected_repo()),
     "registry": ("HERDR_TEAM_REGISTRY", lambda d: str(Path(d["folder"]) / ".agents" / "workspace-registry.yaml")),
     "vault": ("HERDR_TEAM_VAULT", lambda d: str(Path(d["folder"]) / "vault")),
     "activity_log": ("HERDR_TEAM_ACTIVITY_LOG", lambda d: str(Path(d["vault"]) / "log.md")),
 }
 
-ENUMS = {"voice": ("on", "off"), "watch": ("on", "off")}
-ORDER = ("space", "folder", "voice", "watch", "repo", "registry", "vault", "activity_log")
+ENUMS = {"voice": ("on", "off")}
+ORDER = ("space", "folder", "voice", "repo", "registry", "vault", "activity_log")
 
 HEADER = """# Herdr app agent team — per-machine launcher config.
 # Written by `/hteam setup` (or `hteam-config set`). Env vars and flags win over
@@ -110,8 +109,6 @@ def normalise(key: str, value: str) -> str:
         if lowered not in ENUMS[key]:
             fail(f"{key} must be one of {', '.join(ENUMS[key])}, got {value!r}")
         return lowered
-    if key == "watch":  # pragma: no cover - covered by ENUMS above
-        return value
     if not value:
         fail(f"{key} must not be empty")
     return value
@@ -170,8 +167,6 @@ def cmd_env(args) -> int:
         if os.environ.get(env_name):
             continue  # env wins over the file
         value = values[key]
-        if key == "watch":
-            value = "1" if value == "on" else "0"
         print(f"export {env_name}={shlex.quote(value)}")
     return 0
 

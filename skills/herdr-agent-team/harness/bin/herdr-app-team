@@ -14,19 +14,12 @@
 # Usage:
 #   herdr-app-team                 start (or report) the Orchestrator in the app
 #   herdr-app-team check           validate prerequisites only
-#   herdr-app-team --watch on|off  start the ClickUp intake watcher in its own tab
-#                                  (default off). `--no-watch` is a legacy alias
-#                                  for `--watch off`.
 #   herdr-app-team --space NAME    control space name (default: Herdr Team)
 #   herdr-app-team --folder PATH   where team terminals start (default ~/Workspaces)
 #   herdr-app-team --voice on|off  speak short Thai status from the orchestrator and
 #                                  PM (default off). Needs bin/tts-thai.sh and either
 #                                  needs a gtts-cli binary and network.
 #                                  Workers and verifiers never speak.
-#
-# Starting does not launch the ClickUp intake watcher (bin/clickup-watch) by
-# default: pass --watch on (or HERDR_TEAM_WATCH=1) to run it in its own tab of
-# the control space.
 
 set -euo pipefail
 
@@ -65,7 +58,6 @@ VAULT_PATH="${HERDR_TEAM_VAULT:-$CWD/vault}"
 ACTIVITY_LOG="${HERDR_TEAM_ACTIVITY_LOG:-$VAULT_PATH/log.md}"
 SPACE="${HERDR_TEAM_SPACE:-Herdr Team}"
 MODE="start"
-WATCH="${HERDR_TEAM_WATCH:-0}"
 VOICE="${HERDR_VOICE_MODE:-off}"
 
 die()  { echo "herdr-app-team: $*" >&2; exit 1; }
@@ -78,8 +70,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     check) MODE="check"; shift ;;
     --space) SPACE="${2:-}"; shift 2 ;;
-    --watch) WATCH="${2:-}"; shift 2 ;;
-    --no-watch) WATCH="0"; shift ;;
     --folder) CWD="${2:-}"; shift 2 ;;
     --voice) VOICE="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -90,14 +80,6 @@ done
 case "$VOICE" in
   on|off) ;;
   *) die "--voice must be on or off, got '$VOICE'" ;;
-esac
-
-# --watch / HERDR_TEAM_WATCH accepts the same on|off vocabulary as --voice, plus
-# the legacy 1|0 the config file exports.
-case "$WATCH" in
-  on|1)   WATCH="1" ;;
-  off|0)  WATCH="0" ;;
-  *) die "--watch must be on or off, got '$WATCH'" ;;
 esac
 
 # ============================================================================
@@ -132,12 +114,11 @@ if [ "$MODE" = "check" ]; then
     echo "  MISS: role spawner (run setup_harness.sh)" >&2
     exit 1
   fi
-  echo "  ok:   watch: $([ "$WATCH" = "1" ] && echo on || echo off)"
   if [ -x "$REPO/bin/clickup-watch" ]; then
-    echo "  ClickUp intake watcher:"
-    "$REPO/bin/clickup-watch" check || echo "  warn: ClickUp intake watcher is not ready (hteam still starts; polls will fail)" >&2
+    echo "  ClickUp helpers:"
+    "$REPO/bin/clickup-status" check || echo "  warn: ClickUp helpers are not ready (hteam still starts; ask/mark will fail)" >&2
   else
-    echo "  warn: ClickUp intake watcher missing: $REPO/bin/clickup-watch" >&2
+    echo "  warn: ClickUp helpers missing: $REPO/bin/clickup-status" >&2
   fi
   if [ "$VOICE" = "on" ]; then
     if [ -x "$REPO/bin/tts-thai.sh" ]; then
@@ -183,30 +164,6 @@ for t in data.get("terminals") or []:
 argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 
 slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/_/g; s/^_//; s/_$//'; }
-
-# ============================================================================
-# ClickUp intake watcher
-# ============================================================================
-# The watcher lives with the team: it starts with `hteam` and dies with it.
-# It is a plain loop in its own Herdr tab, not an agent, so a poll costs no
-# model tokens. It is off unless asked for: --watch on or HERDR_TEAM_WATCH=1.
-WATCHER="$REPO/bin/clickup-watch"
-
-start_watcher() {
-  if [ "$WATCH" != "1" ]; then
-    echo "  skip: ClickUp intake watcher off (enable with --watch on / HERDR_TEAM_WATCH=1)"
-    return 0
-  fi
-  if [ ! -x "$WATCHER" ]; then
-    echo "  skip: ClickUp intake watcher not installed ($WATCHER)" >&2
-    return 0
-  fi
-  if "$WATCHER" start; then
-    ok "ClickUp intake watcher running in space '$SPACE'"
-  else
-    echo "  warn: ClickUp intake watcher did not start — run: $WATCHER status" >&2
-  fi
-}
 
 # ============================================================================
 # state + brief
@@ -295,7 +252,6 @@ if [ -n "$EXISTING" ]; then
   echo "herdr-app-team: the Orchestrator is already live in space '$SPACE':"
   echo "$EXISTING" | sed 's/^/  /'
   echo "Talk to it with: $HC send <terminal-id> \"...\""
-  start_watcher
   exit 0
 fi
 
@@ -338,5 +294,4 @@ printf '%s\n' "$RESULT" | sed 's/^/  /'
 echo "herdr-app-team: Orchestrator started in space '$SPACE' (terminal $TERMINAL)"
 echo "  talk to it:  $HC send $TERMINAL \"...\""
 echo "  read it:     $HC read $TERMINAL --lines 200"
-start_watcher
 exit 0

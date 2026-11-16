@@ -1,6 +1,6 @@
 ---
 name: herdr-agent-team
-description: Run a multi-agent delivery team with enforced staffing, scope locks and verification gates. Use when coordinating several AI agents on one codebase — sizing the smallest team for a task, freezing a verified diff before a commit, keeping a writer's work independent from its verifier, or auditing why a change shipped. Ships a workflow-shape resolver, a durable task board, role contracts and the delivery protocol. Tuned for the Herdr app; the policy and scripts run with any agent runtime.
+description: Run a multi-agent delivery team with enforced staffing, scope locks and verification gates, and start or check that team in the Herdr desktop app with the `hteam` launcher. Use when coordinating several AI agents on one codebase — sizing the smallest team for a task, freezing a verified diff before a commit, keeping a writer's work independent from its verifier, auditing why a change shipped — or when the Human types hteam or /hteam to open the app team. Ships a workflow-shape resolver, a durable task board, role contracts, the delivery protocol, and the launcher docs. Tuned for the Herdr app; the policy and scripts run with any agent runtime.
 ---
 
 # Herdr agent team
@@ -13,6 +13,15 @@ Everything here runs without a multiplexer. Herdr is the recommended runtime —
 it gives you one space per project and child terminals under each controller —
 but the policy, the resolver, and the task board work with any runtime that can
 spawn a process and send a message.
+
+## Two entry points
+
+- **Start or check the team** — the Human types `hteam` or `/hteam`, or the app
+  team is not running yet: read [`references/launcher.md`](references/launcher.md)
+  first. It covers the launcher's commands, the per-machine config, and the
+  failure modes worth recognising.
+- **Do the work** — a task needs staffing, scope, verification, a commit, or an
+  audit: start with the four rules and the flow below.
 
 ## The four rules
 
@@ -115,49 +124,17 @@ work.
 
 ### Placement
 
-| Room | Who gets it |
-|---|---|
-| one space per project | every role of that project, and nothing else |
-| a tab | orchestrator and PM — the two the Human talks in |
-| a child terminal of its controller | every role below PM |
-
-A child is `hc run --bg --parent <controller>` and inherits the controller's
-working context; it ends when the controller ends. Start one with
-`--outlive-parent` only when the work is deliberately meant to survive its
-controller, and say why in the plan.
-
-Rules that follow from the placement:
-
-- **The controller closes what it opened.** PM closes its children when the task
-  ends — reports collected, verification and commit gate reached, or `[STUCK]` —
-  and a worker closes any child it opened before reporting.
-- **Cleanup cascades.** Killing a controller ends its descendants, so nobody has
-  to hunt grandchildren.
-- **Depth is allowed, visibility is not.** Nesting works at any depth and
-  `hc ls` shows the parent chain, but a sidebar renders one level; use `hc ls`
-  when you need to know who belongs to whom.
-- **Name by role and project** (`{role}-{project}` or
-  `{role}-{project}-{workstream}`) so a terminal is identifiable without reading
-  its transcript.
+Every project gets its own app space; the orchestrator and PM are the tabs the
+Human talks in, and every role below PM is a child terminal of its controller.
+The room table, the child-terminal rules, and the naming convention are in
+[`references/placement.md`](references/placement.md).
 
 ## Runtimes
 
-Nothing here is tied to one CLI. A machine may have `pi`, `hermes`, `codex`,
-`claude`, `opencode`, or `kiro-cli` — or only one of them — and the team still
-works because a runtime is judged by verbs, not by name:
-
-```bash
-./scripts/runtime-probe          # what this machine has, and what each CLI can do
-./scripts/roster coder critical  # role + tier -> runtime, model, selection, source
-```
-
-`references/runtime-adapters.md` records the six verbs (`launch`, `ask`, `send`,
-`resume`, `model`, `permissions`), the verified invocation for each CLI, and the
-degraded mode when a verb is missing. `roster` never invents a model: a pair that
-is uninstalled, disabled, or off the allowlist is refused, and an empty result is
-`[STUCK]` rather than a substitution. Neither script installs a CLI, logs in, or
-reads a credential. `bash tests/runtime.test.sh` exercises both against fake
-runtime binaries, offline.
+A runtime is judged by verbs, not by name: `launch`, `ask`, `send`, `resume`,
+`model`, `permissions`. Probe this machine with `scripts/runtime-probe` and
+resolve a role with `scripts/roster`; the contract, the per-CLI invocations, and
+the degraded modes are in [`references/runtime-adapters.md`](references/runtime-adapters.md).
 
 ## Communication
 
@@ -198,6 +175,17 @@ clones the harness repository, installs the skill layer, then runs
   with your launcher.
 - Trackers and issue sync. Intake is a file here; wire it to whatever tracker you
   use and keep the same shape.
+
+## Reference map
+
+| Question | Read |
+|---|---|
+| start, check, or configure the app team | `references/launcher.md` |
+| who should work on this task | `references/workflow-shapes.md` |
+| messages, verdicts, commit gates | `references/communication-protocol.md` |
+| one role's identity and authority | `references/roles/<role>.md` |
+| where a role runs (space, tab, child terminal) | `references/placement.md` |
+| another agent CLI | `references/runtime-adapters.md` |
 
 ## Pitfalls
 

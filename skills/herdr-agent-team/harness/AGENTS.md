@@ -52,7 +52,7 @@ vault content remains outside this repository.
    stop starting work: write the state where the next turn can find it and end
    the turn. A pane past that point repeats itself, re-reads its whole
    transcript, and produces less than it costs. Compaction is automatic
-   (`~/.agents/extensions/auto-compact.ts`, threshold 55%, log at
+   (`~/.agents/extensions/auto-compact.ts`, threshold 50%, log at
    `~/.config/herdr/auto-compact.log`), but it is a safety net, not an excuse to
    fill a pane.
 6. Pane transcript access is restricted:
@@ -353,7 +353,7 @@ talks in; `--place tab|child` overrides the default for one launch.
 ### One space per project
 
 Every project gets its **own app space named after its runtime slug**; the
-control space holds only the Orchestrator (and the ClickUp intake watcher). A
+control space holds only the Orchestrator. A
 project role is always launched with `--project <slug>`, which creates or
 reuses that space, and the launcher refuses a project role without it and
 refuses `--space` alongside it. Opening a project therefore never mixes its
@@ -402,59 +402,29 @@ must not scan the vault root, escape the scope through symlinks, read excluded
 or unrelated notes, or mutate vault content. A requested write is a separate
 Documenter task with exact `Allowed files`.
 
-## ClickUp Intake
+## ClickUp Status Helpers
 
-`bin/clickup-watch` is Human-authorized intake infrastructure, not a role. When
-`hteam` runs it, it polls the ClickUp lists of the projects whose registry entry
-sets `clickup: { auto_intake: true }` — every 30 minutes, and no other project's
-list — for tasks in the trigger status (`to do`) and pushes a brief to that
-project's PM pane. It is a plain loop, not an agent: a poll spends no model
-tokens. It never writes code, never touches Git, and never assigns a Worker.
-Auto intake is off for every project until that flag is set, so the watcher
-polls nothing by default.
+There is no ClickUp intake loop. `bin/clickup-status` is a Human-run helper, not
+a role and not a dispatcher: it never polls a list, never reads a list to find
+work, never assigns a task, and never touches a repository or Git.
 
-- The project is the list the task came from. A `project: <slug>` line in the
-  task description overrides it; the watcher must never guess a project from
-  free text. Only when it is run against a single unmapped list (config
-  `list_id`) does it fall back to matching the task text, and an unresolved task
-  is then moved to `discuss` with a comment stating what is missing.
-- The watched list is shared with people, so intake is opt-in on two counts:
-  the task must carry the configured tag (default `agent-team`) **and** be
-  assigned to this instance's own ClickUp user (default `me`). Each herdr-team
-  person has a different ClickUp login, so this keeps two instances from taking
-  each other's work. A task failing either test is never read further,
-  commented on, moved, or assigned.
-- A claimed task is assigned to the agent's ClickUp user, moved to
-  `in progress`, and annotated with a comment naming the project and receiving
-  pane. An assignee a person already holds is never replaced; the claim is
-  skipped and logged.
-- The loop is two-way. When PM needs a decision or missing information it runs
-  `clickup-watch ask --task <id> --text "<question>"`, which writes a
-  `[herdr-team]` comment and parks the task in `discuss`. The Human answers in
-  ClickUp and moves the task back to `to do`; the next poll re-dispatches it with
-  those answers quoted in the brief. PM may run that one helper (ClickUp only —
-  it grants no file, Git, scope, commit, push, or PR authority); no other
-  ClickUp write by an agent is allowed.
-- The watcher also watches its own claims: a task it dispatched that stays
-  `in progress` with no ClickUp activity for `stale_hours` (default 8) is
-  commented and moved to `discuss`, so a dead pane or a forgotten task returns
-  to the Human instead of hanging. This nudge needs no Human authorization.
-- Delivery target is the PM pane whose tab is `pm-{runtime_slug}` (registry
-  `ap-intranet` → `pm-ap_intranet`). A bare `pm` pane belongs to another project
-  and is never used. With no PM live, the watcher asks the Orchestrator to open
-  that project's workspace and PM, and leaves the task in `to do` until a PM
-  exists; the request repeats at most every 30 minutes.
-- An intake brief grants no scope, commit, push, or PR authority. PM must still
-  present its plan, `Allowed files`, `Required behavior`, `Forbidden scope`, the
-  non-protected `Work branch`, and the explicit gate-versus-`AUTO_COMMIT`
-  question to the Human in its own pane, and wait for approval before dispatch.
-- Status ownership is explicit, because otherwise nobody updates it:
-  the watcher writes `to do` → `in progress` on handoff and `to do` → `discuss`
-  on ambiguity or a stale claim; **PM owns every later status** and does it with
-  `clickup-watch mark --task <id> --status "in progress|discuss|ready"`, which
-  also comments. PM marks a finished task (or a finished subtask) `ready`;
-  `done`, `reject`, `complete`, merging, and re-prioritising stay with the Human.
-  Workers never touch ClickUp.
+- `clickup-status ask --task <id> --text "<question>"` writes a `[herdr-team]`
+  comment and parks the task in `discuss`.
+- `clickup-status mark --task <id> --status "in progress|discuss|ready"
+  [--text "<note>"]` advances a task or subtask with a comment.
+- `clickup-status status` and `check` show the configuration and MCP login in
+  use; `init` writes the optional config file.
+
+Ownership: a task is writable only when it is assigned to this agent's ClickUp
+user (default `me`). A task a person already holds is left to that person, and
+the human closing, rejecting, or merging it stays with the Human — `done`,
+`complete`, `reject`, review, and merge statuses are never written by an agent.
+
+The old `clickup-watch` command remains a deprecated alias for one release.
+
+**PM owns task status**; Workers never touch ClickUp. A PM question parks the
+task in `discuss`; the Human answers in ClickUp and continues the conversation
+in the PM pane. Neither helper grants scope, commit, push, or PR authority.
 
 ## Minimal Change and Scope Lock
 
@@ -537,34 +507,22 @@ mutation remain forbidden.
   most recently received direct Human input. Agent-to-agent protocol traffic,
   background PMs, and every other role remain silent.
 - Voice is enabled per launch, never left implicit: `hteam --voice on` (or
-  `HERDR_VOICE_MODE=on`) puts `HERDR_VOICE_MODE` into the Orchestrator's argv and
-  `bin/herdr-app-spawn-role` forwards it to every child it starts, so the whole
-  team agrees on one mode. `hteam check` reports the effective mode and whether
-  the TTS adapter (`bin/tts-thai.sh`) is present; `off` is the default. The
-  engine is VoiceStudio `omnivoice` through `bin/tts-speak-omni` — the voice the
-  Human picked is the Thai-native profile `c3141426` at speed 0.9 with a light
-  band-pass chain (120 Hz–7.5 kHz, gentle compression, -16 LUFS, no reverb) — and gTTS is the fallback when VoiceStudio is not running,
-  so a machine without the backend still speaks. `HERDR_GTTS_CLI` selects the
-  gTTS binary, `HERDR_VOICE_SPEED` the rate, `VS_URL`/`TTS_OMNI_VOICE` the
-  VoiceStudio backend and profile. There is still no macOS `say` fallback: the
-  team never speaks in a voice nobody chose.
-- The ClickUp intake watcher follows the same rule: `hteam --watch on` (or
-  `HERDR_TEAM_WATCH=1`) starts it in its own tab of the control space, and
-  `off` is the default, so a plain `hteam` never polls ClickUp behind the
-  Human's back. `--watch` takes the same `on|off` vocabulary as `--voice`
-  (`--no-watch` survives as an alias for `--watch off`), and `hteam check`
-  reports the effective mode.
-- `hteam` is also a Pi command: `/hteam [check] [--voice on|off] [--watch on|off]` from any Pi
+  `HERDR_VOICE_MODE=on`) reaches every child the launcher starts, and exactly one
+  Human-facing controller owns speech. `off` is the default and `hteam check`
+  reports it. There is no macOS `say` fallback: the team never speaks in a voice
+  nobody chose. The engine profile, the gTTS fallback, and the environment
+  variables live in the launcher reference
+  (`~/.agents/skills/herdr-agent-team/references/launcher.md`).
+- `hteam` is also a Pi command: `/hteam [check] [--voice on|off]` from any Pi
   session runs the same launcher (`~/.pi/agent/extensions/hteam.ts`), and refuses
   to start a second team when the session is already a team pane. Install it with
   `./setup_harness.sh`; never copy the extension by hand.
-- `/hteam setup` writes the per-machine launcher config
-  (`~/.config/herdr-team/hteam.yaml`: space, folder, voice, watch, repo,
-  registry, vault, activity log) and lets the Human pick the depth: `เริ่มต้น`
-  asks space/folder/voice/watch, `เร็ว` accepts the detected values after one
-  confirmation, `ละเอียด` edits each path and ends with a review. Precedence is
-  flag > env > config file > default; `hteam-config show` prints the source of
-  every value and refuses an invalid file before any launcher reads it.
+- `/hteam setup` writes `~/.config/herdr-team/hteam.yaml` (space, folder, voice,
+  repo, registry, vault, activity log) with the depth prompts `เริ่มต้น` / `เร็ว` /
+  `ละเอียด`. Precedence is flag > env > config file > default. The flags, the
+  keys, and the exact prompts are in the launcher reference; `hteam-config show`
+  prints the source of every value and refuses an invalid file before any
+  launcher reads it.
 
 Every assignment has an explicit reply target:
 

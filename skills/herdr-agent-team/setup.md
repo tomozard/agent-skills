@@ -16,9 +16,8 @@ repository to clone.
   overwrites it. Change the skill repository, or the config files named below.
 - Ask one phase at a time. If the Human declines a phase, record the default you
   used and say so.
-- ClickUp **auto-intake is out of scope in this phase.** Do not write
-  `clickup-watch.yaml`, do not enable `--watch`, do not register ClickUp lists.
-  Record only which tracker the Human uses (phase 6).
+- ClickUp **auto-intake no longer exists.** Do not register ClickUp lists for
+  intake. Record only which tracker the Human uses (phase 6).
 
 ## Phase 1 — Herdr desktop app
 
@@ -204,14 +203,13 @@ mkdir -p ~/.config/herdr-team
 cat > ~/.config/herdr-team/task-status.md <<EOF
 tracker: <none|clickup|linear|jira|notion>
 workspace: <id or url, if any>
-auto_intake: deferred
 notes: <how the Human expects status to be reported>
 EOF
 ```
 
 Work is dispatched by the Human in the PM pane; the team's own state lives on the
-task board and in the activity log. ClickUp auto-intake is a later phase and stays
-disabled (`hteam --watch off`).
+task board and in the activity log. ClickUp is a status helper only: `clickup-status
+ask` and `mark` are available, and nothing polls a list.
 
 ## Phase 7 — install
 
@@ -257,21 +255,25 @@ critical tier: <runtime/model per role group>
 vault: <path>
 projects folder: <path>
 registry: <path> (<n> projects)
-tracker: <none|clickup|linear|jira|notion> (auto-intake deferred)
+tracker: <none|clickup|linear|jira|notion> (status is manual; no intake loop)
 EOF
 ```
 
 ## Phase 9 — update or remove
 
+> The `hteam` skill was merged into this one. A machine that still has
+> `~/.agents/skills/hteam` should run `npx skills remove hteam -g -y`; the
+> `/hteam` command comes from the harness payload, not from that skill.
+
 ```bash
 # update the payload, then reinstall
-npx skills update herdr-agent-team hteam -g -y
+npx skills update herdr-agent-team -g -y
 cd ~/.agents/skills/herdr-agent-team/harness && ./setup_harness.sh
 
 # remove
 cd ~/.agents/skills/herdr-agent-team/harness && ./uninstall.sh
-npx skills remove herdr-agent-team hteam -g -y
-rm -f ~/.hermes/skills/{herdr-agent-team,hteam}
+npx skills remove herdr-agent-team -g -y
+rm -f ~/.hermes/skills/herdr-agent-team
 ```
 
 `uninstall.sh` never deletes `{folder}/.agents/task-board`, the registry, the vault
@@ -283,7 +285,7 @@ or `~/.config/herdr-team/setup-answers.md`.
 |---|---|---|
 | `the agent-skills tooling is missing` | `npx skills add` not run | run the command it prints |
 | `PyYAML is missing` | pip dependency absent | `python3 -m pip install --user pyyaml` |
-| `clickup-watch tests failed` | PyYAML absent, gate bypassed | install PyYAML, re-run |
+| `clickup-status tests failed` | PyYAML absent, gate bypassed | install PyYAML (`python3 -m pip install --user pyyaml`), re-run |
 | `validate: …` after phase 3 | suite asserts shipped model tables | use `--skip-validate`, keep the roster check |
 | `model_independence.status` not `ok` | writer and verifier share a model | change one model or the tier |
 | `missing role file` | phase 7 not run, or wrong directory | `cd …/harness && ./setup_harness.sh` |

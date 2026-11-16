@@ -1,20 +1,18 @@
----
-name: hteam
-description: Start, check or configure the Herdr app agent team from one command. Use when the Human types hteam or /hteam, asks to open or check the team in the Herdr desktop app, or asks where the ClickUp intake watcher comes from. Maps the alias to bin/herdr-app-team, keeps tmux and the herdr TUI out of it, and reports the effective space, folder, voice and watch mode before acting.
----
-
-# hteam — Herdr app agent team launcher
+# Launcher — `hteam` in the Herdr app
 
 `hteam` is the Human's alias for `bin/herdr-app-team`, the launcher that starts
 the agent-team Orchestrator **inside the Herdr desktop app** (an `herdr-app`
 window whose terminals live in `herdr-core`). It is not a chat instruction and
 not a task prompt: a bare `hteam` in a chat pane means "run the launcher".
 
+This page is the operator entry point. The delivery discipline — staffing,
+scope, verification, commit gates — is the rest of this skill.
+
 Two runtimes exist and they do not share state:
 
 | | launcher | transport | scope |
 |---|---|---|---|
-| Herdr app | `bin/herdr-app-team` (`hteam`) | `hc send/read/run`, `herdr-app do` | this skill |
+| Herdr app | `bin/herdr-app-team` (`hteam`) | `hc send/read/run`, `herdr-app do` | this skill (app runtime) |
 | herdr TUI | `bin/herdr-team` | `herdr pane run/read` | not this skill |
 
 Never substitute one for the other, never use `tmux`, and never call the `herdr`
@@ -23,7 +21,7 @@ TUI binary from an app terminal.
 ## Before you act
 
 ```bash
-hteam check          # app reachable, repo, role files, registry, watcher, voice
+hteam check          # app reachable, repo, role files, registry, voice
 ```
 
 `check` needs no model turn and changes nothing. If it fails, report the failing
@@ -43,29 +41,25 @@ Bare `hteam` in a chat pane:
 ```bash
 hteam                        # start (or report) the Orchestrator in the app
 hteam check                  # validate prerequisites only
-hteam --watch on|off         # ClickUp intake watcher in its own tab (default: off)
 hteam --voice on|off         # short Thai status speech from Orchestrator and PM
 hteam --space NAME           # control space (default: Herdr Team)
 hteam --folder PATH          # where team terminals start (default ~/Workspaces)
-hteam --no-watch             # legacy alias for --watch off
 ```
 
-A plain `hteam` starts no watcher: the Human must ask for `--watch on` (or set
-`HERDR_TEAM_WATCH=1`). Never claim tickets are being polled unless `hteam check`
-prints `watch: on`.
+There is no ClickUp intake watcher: work reaches a PM because the Human hands
+it over in the PM pane, not because anything polls a list.
 
 ## Per-machine config
 
 `/hteam setup` (Pi) or `hteam-config` writes `~/.config/herdr-team/hteam.yaml`:
-`space`, `folder`, `voice`, `watch`, `repo`, `registry`, `vault`,
-`activity_log`.
+`space`, `folder`, `voice`, `repo`, `registry`, `vault`, `activity_log`.
 
 ```bash
 hteam-config show        # effective values + where each came from
 hteam-config show --json
-hteam-config get watch voice
-hteam-config set watch on voice off    # unrelated keys are kept
-hteam-config write --json '{"space":"Herdr Team","watch":"on"}'
+hteam-config get voice
+hteam-config set voice off    # unrelated keys are kept
+hteam-config write --json '{"space":"Herdr Team","voice":"on"}'
 hteam-config validate
 hteam-config path
 ```
@@ -73,20 +67,25 @@ hteam-config path
 Precedence is **flag > env > file > default**; deleting a key falls back to the
 built-in default. An invalid value is refused before anything is written.
 
+## Voice engine
+
+Voice is per launch (`--voice on`, or `HERDR_VOICE_MODE=on`, forwarded to every
+child). The engine is VoiceStudio `omnivoice` through `bin/tts-speak-omni`; the
+Thai-native profile is `c3141426` at speed 0.9 with a light band-pass chain
+(120 Hz–7.5 kHz, gentle compression, -16 LUFS, no reverb). gTTS is the fallback
+when VoiceStudio is not running, so a machine without the backend still speaks.
+`HERDR_GTTS_CLI` selects the gTTS binary, `HERDR_VOICE_SPEED` the rate,
+`VS_URL`/`TTS_OMNI_VOICE` the backend and profile. There is no macOS `say`
+fallback.
+
 ## Requirements
 
-This skill drives the launcher; it does not ship it. The binaries, role files,
-`team.json`, registry and the `setup_harness.sh` installer come from the
-**project-scaffold harness repository**:
+The payload ships with this skill (`harness/`): the binaries, role files,
+`team.json`, registry and the `setup_harness.sh` installer. If
+`command -v hteam` is empty, the payload is not installed.
 
-```bash
-git clone <project-scaffold repo> && cd project-scaffold && ./setup_harness.sh
-```
-
-If `command -v hteam` is empty, the harness is not installed. Follow
-`setup.md` next to the `herdr-agent-team` skill (installed at
-`~/.agents/skills/herdr-agent-team/setup.md`) and run its steps in order — do not
-reconstruct the launcher, and do not copy files into `~/bin` by hand.
+Follow [`../setup.md`](../setup.md) in order — do not reconstruct the launcher,
+and do not copy files into `~/bin` by hand.
 
 The launcher starts agents through `bin/agent-runtime`, which picks the runtime
 from the task tier in `team.json` (`standard` → pi, `critical` → claude) and
@@ -103,5 +102,5 @@ does not route to.
 - **A child waits forever at a dialog** — Claude Code asks to trust a new folder
   (the adapter pre-registers it), or a hook wants confirmation for a command
   that carries a secret. Answer or stop; do not retry blindly.
-- **Space outlives the team** — `herdr-app do space.close --id <space> --confirmed true`
-  ends the space and its terminals, watcher included.
+- **Space outlives the team** — `herdr app do space.close --id <space> --confirmed true`
+  ends the space and its terminals.

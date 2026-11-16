@@ -104,8 +104,8 @@ if [ "$MODE" = "real" ]; then
   printf 'backup: %s\n' "$BK"
 
   # uninstall.sh does not manage the skill layer — remove it explicitly.
-  want_ok npx --yes skills remove herdr-agent-team hteam -g -y
-  rm -f "$HOME/.hermes/skills/herdr-agent-team" "$HOME/.hermes/skills/hteam"
+  want_ok npx --yes skills remove herdr-agent-team -g -y
+  rm -f "$HOME/.hermes/skills/herdr-agent-team"
 
   # The installer must refuse before the harness goes, otherwise the gate is untested.
   want_fail "$HARNESS_SRC/setup_harness.sh"
@@ -117,7 +117,7 @@ if [ "$MODE" = "real" ]; then
   want_ok "$HARNESS_SRC/uninstall.sh" --check
 
   step "2. verify the machine is bare"
-  for cmd in hteam herdr-app-team agent-runtime spawn-agent task-board workflow-shape clickup-watch; do
+  for cmd in hteam herdr-app-team agent-runtime spawn-agent task-board workflow-shape clickup-status clickup-watch; do
     command -v "$cmd" >/dev/null && bad "$cmd still on PATH ($(command -v "$cmd"))" || ok "$cmd gone"
   done
   for p in "$HOME/.agents/team.json" "$HOME/.agents/agents" "$HOME/.agents/agents.md" \
@@ -136,7 +136,6 @@ fi
 # ----------------------------------------------- 3. skill layer via skills.sh
 step "3. install the skill layer with skills.sh"
 want_ok in_target npx --yes skills add tomozard/agent-skills/skills/herdr-agent-team -g -a '*'
-want_ok in_target npx --yes skills add tomozard/agent-skills/skills/hteam -g -a '*'
 [ -f "$TARGET_HOME/.agents/skills/herdr-agent-team/SKILL.md" ] \
   && ok "skill installed: ${TARGET_HOME#$HOME/}/.agents/skills/herdr-agent-team" \
   || bad "skill not installed"

@@ -74,7 +74,6 @@ const CONFIG_KEYS = [
   "space",
   "folder",
   "voice",
-  "watch",
   "repo",
   "registry",
   "vault",
@@ -105,7 +104,7 @@ const askText = async (
 };
 
 const MODES = [
-  "เริ่มต้น — ถาม 4 ค่า (space, folder, voice, watch)",
+  "เริ่มต้น — ถาม 3 ค่า (space, folder, voice)",
   "เร็ว — ใช้ค่าที่ตรวจพบทั้งหมด ยืนยันครั้งเดียว",
   "ละเอียด — ตรวจ path ทีละตัว + health check + review",
 ];
@@ -150,13 +149,6 @@ async function runSetup(preset: string, ctx: any): Promise<void> {
     const voice = await ctx.ui.select("voice (speaks from Orchestrator and PM only)", ["off", "on"]);
     if (!voice) return;
     next.voice = voice;
-
-    const watch = await ctx.ui.select(
-      "ClickUp intake watcher (default off; `hteam --watch on` enables one run)",
-      ["off", "on"],
-    );
-    if (!watch) return;
-    next.watch = watch;
   }
 
   if (mode === "detailed") {
@@ -171,7 +163,6 @@ async function runSetup(preset: string, ctx: any): Promise<void> {
     `space:         ${next.space}`,
     `folder:        ${next.folder}`,
     `voice:         ${next.voice}`,
-    `clickup watch: ${next.watch}`,
     `repo:          ${next.repo}`,
     `registry:      ${next.registry}`,
     `vault:         ${next.vault}`,

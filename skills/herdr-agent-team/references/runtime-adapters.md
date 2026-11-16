@@ -76,3 +76,20 @@ Rules the roster enforces, which a plan may not override:
   resolves and the machine has is the one to launch.
 - It does not switch runtime mid-task. A role's session stays on the runtime it
   started on; a move is a new spawn with a new verification pass.
+
+## What this machine has
+
+Nothing here is tied to one CLI. A machine may have `pi`, `hermes`, `codex`,
+`claude`, `opencode`, or `kiro-cli` — or only one of them — and the team still
+works because a runtime is judged by verbs, not by name:
+
+```bash
+./scripts/runtime-probe          # what this machine has, and what each CLI can do
+./scripts/roster coder critical  # role + tier -> runtime, model, selection, source
+```
+
+`roster` never invents a model: a pair that is uninstalled, disabled, or off the
+allowlist is refused, and an empty result is `[STUCK]` rather than a
+substitution. Neither script installs a CLI, logs in, or reads a credential.
+`bash tests/runtime.test.sh` exercises both against fake runtime binaries,
+offline.

@@ -69,7 +69,7 @@ steam() {
     HERDR_APP_BIN="$TMP/app" HC_BIN="$TMP/hc" \
     HERDR_TEAM_REPO="$ROOT" HERDR_TEAM_REGISTRY="$TMP/registry.yaml" \
     HERDR_TEAM_VAULT="$TMP/vault" HERDR_TEAM_ACTIVITY_LOG="$TMP/vault/log.md" \
-    HERDR_TEAM_CWD="$TMP/work" \
+    HERDR_TEAM_CWD="$TMP/work" HERDR_TEAM_STATE_DIR="$TMP/state" \
     HERDR_TEAM_CONFIG="${HERDR_TEAM_CONFIG:-$TMP/no-config.yaml}" \
     bash "$HTEAM" "$@"
 }
@@ -83,7 +83,7 @@ ok "--voice rejects anything but on|off"
 
 # --- 2. voice=on reaches the Orchestrator terminal env --------------------
 : > "$TMP/calls.log"
-steam --voice on --watch off >"$TMP/out" 2>"$TMP/err" || fail "start with --voice on failed: $(cat "$TMP/err")"
+steam --voice on >"$TMP/out" 2>"$TMP/err" || fail "start with --voice on failed: $(cat "$TMP/err")"
 grep -q "HERDR_VOICE_MODE=on" "$TMP/calls.log" \
   || fail "the Orchestrator argv does not carry HERDR_VOICE_MODE=on: $(head -2 "$TMP/calls.log")"
 grep -q "role.*orchestrator\|--role orchestrator" "$TMP/calls.log" || fail "the Orchestrator role was not launched"
@@ -93,7 +93,6 @@ ok "voice=on is passed into the Orchestrator argv"
 : > "$TMP/calls.log"
 steam >"$TMP/out" 2>"$TMP/err" || fail "default start failed: $(cat "$TMP/err")"
 grep -q "HERDR_VOICE_MODE=off" "$TMP/calls.log" || fail "default is not voice=off"
-grep -q "ClickUp intake watcher off" "$TMP/out" || fail "the watcher is not off by default: $(cat "$TMP/out")"
 ok "voice defaults to off"
 
 # --- 4. check reports the effective voice mode -----------------------------
@@ -103,7 +102,7 @@ ok "check reports voice: on"
 
 # --- 5. the per-machine config file drives the launcher -------------------
 CONFIG="$TMP/hteam.yaml"
-if ! HERDR_TEAM_CONFIG="$CONFIG" "$ROOT/bin/hteam-config" set space "Config Space" folder "$TMP/work" voice on watch off >/dev/null; then
+if ! HERDR_TEAM_CONFIG="$CONFIG" "$ROOT/bin/hteam-config" set space "Config Space" folder "$TMP/work" voice on >/dev/null; then
   fail "hteam-config set failed"
 fi
 grep -q '^space: Config Space$' "$CONFIG" || fail "hteam-config did not write the space key"
@@ -130,17 +129,16 @@ fi
 grep -q "invalid launcher config" "$TMP/err" || fail "invalid config was refused without the reason: $(cat "$TMP/err")"
 ok "invalid config value is refused"
 
-# --- 8. --watch mirrors --voice: on|off only, default off ------------------
-if steam --watch maybe >"$TMP/out" 2>"$TMP/err"; then
-  fail "--watch maybe was accepted"
+# --- 8. the removed intake watcher is gone from the launcher ---------------
+if steam --watch on >"$TMP/out" 2>"$TMP/err"; then
+  fail "--watch was accepted even though the intake watcher is gone"
 fi
-grep -q "watch must be on or off" "$TMP/err" || fail "bad --watch value was not explained: $(cat "$TMP/err")"
+grep -q "unknown argument: --watch" "$TMP/err" || fail "--watch was refused without the reason: $(cat "$TMP/err")"
+if steam --no-watch >"$TMP/out" 2>"$TMP/err"; then
+  fail "--no-watch was accepted even though the intake watcher is gone"
+fi
 OUT="$(steam check 2>&1)" || fail "check failed: $OUT"
-printf '%s' "$OUT" | grep -q "watch: off" || fail "check does not report watch: off by default: $OUT"
-OUT="$(steam check --watch on 2>&1)" || fail "check --watch on failed: $OUT"
-printf '%s' "$OUT" | grep -q "watch: on" || fail "check does not report watch: on: $OUT"
-OUT="$(steam check --no-watch 2>&1)" || fail "the legacy --no-watch alias was refused: $OUT"
-printf '%s' "$OUT" | grep -q "watch: off" || fail "--no-watch is not an alias for --watch off: $OUT"
-ok "--watch accepts on|off, defaults off, --no-watch still works"
+printf '%s' "$OUT" | grep -q "watch:" && fail "check still reports a watch mode: $OUT"
+ok "--watch and --no-watch are gone"
 
 echo "hteam test: ok"

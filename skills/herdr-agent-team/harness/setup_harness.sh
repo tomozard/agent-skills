@@ -44,12 +44,22 @@ MSG
   exit 1
 fi
 
+# The harness ships inside the herdr-agent-team skill; the skill layer also
+# carries the operator reference. Refuse a payload whose skill lost it.
+for rel in references/launcher.md references/placement.md; do
+  if [ ! -f "$ROOT/../$rel" ]; then
+    echo "setup_harness: skill reference missing: $rel" >&2
+    echo "  reinstall the skill first: npx skills add tomozard/agent-skills/skills/herdr-agent-team" >&2
+    exit 1
+  fi
+done
+
 # PyYAML lives in the user site-packages, which is per-HOME: a fresh macOS user
-# account has none, and tests/clickup-watch.test.sh then fails with a message
+# account has none, and tests/clickup-status.test.sh then fails with a message
 # that does not name the cause. Check it here, before validate.sh runs.
 if ! python3 -c 'import yaml' >/dev/null 2>&1; then
   cat >&2 <<'MSG'
-setup_harness: PyYAML is missing (clickup-watch and its tests need it)
+setup_harness: PyYAML is missing (clickup-status and its tests need it)
   Install it for the current user, then re-run:
 
     python3 -m pip install --user pyyaml
@@ -253,7 +263,7 @@ if [ -f "$BIN_MANIFEST" ]; then
   done < "$BIN_MANIFEST"
 fi
 : > "$BIN_MANIFEST"
-for binary in herdr-team agent-runtime spawn-agent verify-pane-agent agent-team-shutdown validate-okf voice-notify task-board workflow-shape herdr-app-team herdr-app-spawn-role hteam-dispatch hteam-config tts-speak-omni clickup-watch; do
+for binary in herdr-team agent-runtime spawn-agent verify-pane-agent agent-team-shutdown validate-okf voice-notify task-board workflow-shape herdr-app-team herdr-app-spawn-role hteam-dispatch hteam-config tts-speak-omni clickup-status clickup-watch; do
   copy_file "$ROOT/bin/$binary" "$HOME/bin/$binary"
   chmod +x "$HOME/bin/$binary"
   echo "$binary" >> "$BIN_MANIFEST"
