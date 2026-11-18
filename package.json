@@ -1,10 +1,35 @@
 {
   "name": "herdr-agent-team",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Install the Herdr agent-team skill (policy layer) and its runtime (setup_harness.sh) with one command.",
+  "version": "0.2.0",
+  "description": "A multi-agent delivery team for real repositories: resolved staffing, a frozen-diff verification gate, and human commit tokens. Ships the installer, health check, setup wizard, and role/routing tooling.",
   "bin": {
+    "herdr-agent-team": "bin/herdr-install",
     "herdr-install": "bin/herdr-install"
+  },
+  "files": [
+    "bin/",
+    "skills/herdr-agent-team/",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "ai-agents",
+    "agent-team",
+    "code-review",
+    "herdr",
+    "multi-agent",
+    "workflow"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tomozard/agent-skills.git"
+  },
+  "homepage": "https://tomozard.github.io/agent-skills/",
+  "bugs": {
+    "url": "https://github.com/tomozard/agent-skills/issues"
   },
   "license": "MIT"
 }

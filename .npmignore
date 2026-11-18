@@ -1,0 +1,11 @@
+# Keep the published tarball to what the installer and the tools need.
+# The site, the analysis scratch space, and the test suite stay in the repository.
+.git
+.github
+analysis
+docs
+skills/herdr-agent-team/harness/tests
+skills/herdr-agent-team/harness/bin/tts-cache
+**/.DS_Store
+**/__pycache__
+**/*.pyc
