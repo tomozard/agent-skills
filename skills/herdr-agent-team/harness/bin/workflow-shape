@@ -22,5 +22,14 @@ if [ ! -x "$SCRIPTS/workflow-shape" ]; then
   exit 3
 fi
 
-export HERDR_TEAM_FILE="${HERDR_TEAM_FILE:-$REPO/.agents/team.json}"
+# Prefer the effective roster the installer renders: it already contains the
+# machine overlay from `hteam model`. Fall back to the payload copy.
+if [ -z "${HERDR_TEAM_FILE:-}" ]; then
+  if [ -f "$HOME/.agents/team.json" ]; then
+    HERDR_TEAM_FILE="$HOME/.agents/team.json"
+  else
+    HERDR_TEAM_FILE="$REPO/.agents/team.json"
+  fi
+fi
+export HERDR_TEAM_FILE
 exec "$SCRIPTS/workflow-shape" "$@"

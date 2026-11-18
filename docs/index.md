@@ -280,7 +280,7 @@ editing is what keeps the two runtimes honest.
 
 | Contract | Lives at | Consumed by | Change it by |
 |---|---|---|---|
-| `team.json` | `~/.agents/team.json` (symlink to `config/team.json` when a clone exists) | every launcher, spawner, `roster`, `workflow-shape`, guards, PM/Supervisor prompts | editing the file, then `roster ROLE TIER` to prove it resolves |
+| `team.json` | `~/.agents/team.json`, generated from `config/team.json` plus `~/.config/herdr-team/team.local.json` | every launcher, spawner, `roster`, `workflow-shape`, guards, PM/Supervisor prompts | editing the file, then `roster ROLE TIER` to prove it resolves |
 | Role text | `~/.agents/agents/<role>.md`, `~/.claude/agents/herdr-<role>.md` | Pi (system prompt) and Claude (custom agent) | changing the repository and re-running the installer |
 | `agent-helpers.sh` | `~/.agents/skills/agent-shared/lib/` | every role: `[ACK]`/`[STATUS]`/`[DONE]`/`[STUCK]`, `agent_pass`, the hash-bound commit gates | it ships with the skill |
 | Guards | `~/.agents/guard-bin/{git,gh,glab}` | every role that runs Git or a forge command | driven by `HERDR_*` policy env, not edited locally |
@@ -380,21 +380,41 @@ Rules the resolver enforces and a plan may not override:
    authentication, payments, destructive data changes, migrations, production
    infrastructure, and cross-repository work always land in `critical`.
 
-**Change a model today** — edit the file, then prove every route still resolves:
+### Pin a model without editing the shipped file
+
+`config/team.json` is replaced by every `npx skills update`, so it is not where a
+machine-specific choice belongs. The effective roster is **canonical + overlay**:
+
+| File | Owner | Survives an update |
+|---|---|---|
+| `~/.agents/skills/herdr-agent-team/config/team.json` | the repository | replaced |
+| `~/.config/herdr-team/team.local.json` | this machine | yes |
+| `~/.agents/team.json` | generated (canonical + overlay) | re-rendered |
 
 ```bash
-$EDITOR ~/.agents/team.json
-~/.agents/skills/herdr-agent-team/scripts/roster coder critical
+hteam model                                   # table, then an interactive edit
+hteam model --json                            # where each role/tier resolves
+hteam model --set coder critical pi antigravity/gemini-3.8-flash
+hteam model --unset coder critical
+hteam model --reset                           # back to the shipped roster
+hteam model --allow-model claude fable        # extend an allowlist deliberately
 ```
 
-Repeat `roster ROLE TIER` for each role and tier you touched. A route that prints
-`[STUCK]` is a broken team, not a warning.
+Every write goes to the overlay, re-renders the effective roster, and is kept only
+if `team-config validate` still resolves all 24 role/tier routes. A refused write
+restores the previous overlay. Tools the wizard uses directly:
 
-> Two caveats today. `~/.agents/team.json` is a symlink to the clone's
-> `config/team.json` when a clone exists, so a local edit can dirty the repository
-> or be replaced by `npx skills update`. And `disabled_model_providers` in
-> `team.json` must still have an enabled alternate for every route that used it.
-> A layered `team.local.json` plus an `hteam model` wizard is the planned fix.
+```bash
+team-config paths          # base, overlay, effective, stale?
+team-config show --json    # the merged roster
+team-config validate       # every role x tier
+team-config reset          # drop the overlay and re-render
+```
+
+> Sharing a model between a writer and its verifier is allowed in the shipped
+> roster — the resolver substitutes an alternate or raises the tier — so
+> `hteam model` prints a note rather than refusing. `disabled_model_providers`
+> still needs an enabled alternate on every route that used it.
 
 ---
 
@@ -406,6 +426,7 @@ Repeat `roster ROLE TIER` for each role and tier you touched. A route that print
 | `hteam check`, `hteam check --deep` | prerequisites, then installed-artifact integrity |
 | `hteam health`, `hteam health --json` | readiness: host, Herdr, runtimes, install, routing, vault, voice — exit `3` when the host cannot run the team |
 | `hteam setup` | guided: Herdr check → folder → vault → projects → voice; `--defaults`, `--dry-run`, `--only`, `--projects all\|none` |
+| `hteam model` | show/pin routing in `team.local.json`, re-render, validate |
 | `hteam-config show`, `set`, `validate` | read and write per-machine config |
 | `hteam-dispatch <role> --brief F --request "…" --risk low` | one call: intake → shape → spawn, and it refuses a role the shape does not staff |
 | `hteam-dispatch --explain --request "…" --risk low` | print the resolved shape without spawning |
@@ -488,9 +509,8 @@ Known gaps, in priority order:
 1. **`hteam health` follow-ups** — it covers the host, Herdr, runtimes, install,
    routing, workspace, and voice; a per-project scope and a `--fix` for missing
    artifacts are still open.
-2. **`hteam model`** — a wizard for routing, writing a layered
-   `team.local.json` so `npx skills update` cannot silently revert a model choice.
-   `hteam setup` deliberately stops before models for that reason.
+2. **`hteam model` follow-ups** — the overlay and the wizard exist; per-role
+   prompt editing (not just routing) and an `--explain` diff are still open.
 3. **`hteam agent`** — a constrained "clone a role contract" wizard; a brand-new
    role still belongs in the repository, with tests.
 4. **npm package** — `npx herdr-agent-team`, version-pinned, instead of fetching

@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""Inspect and pin model routing without touching the shipped roster.
+
+The canonical `config/team.json` is replaced by every `npx skills update`. This
+tool writes only `~/.config/herdr-team/team.local.json`, then renders the
+effective roster the launchers read. Every write is validated before it is kept:
+if any role x tier stops resolving, or a writer ends up sharing a model with the
+verifier that gates it, the previous overlay is restored.
+
+  hteam model                                  show the table, then edit
+  hteam model --json                           machine-readable view
+  hteam model --set coder critical claude opus  pin one route
+  hteam model --unset coder critical            drop one override
+  hteam model --reset                           remove every override
+  hteam model --allow-model claude fable        add a model to the overlay allowlist
+
+Exit codes: 0 ok, 1 refused/restored, 2 usage, 3 the resulting roster is stuck.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+SCHEMA_VERSION = 4
+TIERS = ("standard", "critical")
+WRITERS = ("coder", "refactor")
+VERIFIERS = ("reviewer", "tester")
+
+HERE = Path(__file__).resolve().parent
+
+
+def fail(message: str, code: int = 2) -> "None":
+    print(f"hteam-model: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def tool(name: str, *extra: Path) -> Optional[Path]:
+    for candidate in (HERE / name,
+                      HERE.parent / "scripts" / name,
+                      HERE.parent.parent / "scripts" / name,
+                      *extra):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    found = shutil.which(name)
+    return Path(found) if found else None
+
+
+TEAM_CONFIG = tool("team-config")
+ROSTER = tool("roster")
+
+
+def run(argv: List[Any], timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run([str(item) for item in argv], capture_output=True, text=True, timeout=timeout)
+
+
+def paths() -> Tuple[Path, Path, Path]:
+    if TEAM_CONFIG is None:
+        fail("team-config is not installed (run setup_harness.sh)")
+    result = run([TEAM_CONFIG, "paths", "--json"], timeout=15)
+    if result.returncode != 0:
+        fail("team-config paths failed")
+    # The human lines come first, the JSON object last.
+    text = result.stdout
+    start = text.index("{")
+    data = json.loads(text[start:])
+    return Path(data["base"]), Path(data["overlay"]), Path(data["effective"])
+
+
+def effective_team() -> Dict[str, Any]:
+    result = run([TEAM_CONFIG, "show", "--json"], timeout=15)
+    if result.returncode != 0:
+        fail("cannot read the effective roster", 2)
+    return json.loads(result.stdout)
+
+
+def read_overlay(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        return {"version": SCHEMA_VERSION, "roles": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"overlay is not valid JSON: {path} ({error})")
+    if not isinstance(data, dict):
+        fail(f"overlay must be a JSON object: {path}")
+    data.setdefault("version", SCHEMA_VERSION)
+    data.setdefault("roles", {})
+    return data
+
+
+def write_overlay(path: Path, overlay: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(overlay, indent=2, sort_keys=False) + "\n"
+    handle = tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False,
+                                         prefix=".team.local.", suffix=".tmp")
+    try:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    finally:
+        handle.close()
+    os.replace(handle.name, path)
+
+
+def route_of(team: Dict[str, Any], role: str, tier: str) -> Optional[Dict[str, str]]:
+    entry = (team.get("roles") or {}).get(role) or {}
+    if entry.get("model_selection") == "fixed":
+        models = entry.get("models") or {}
+        runtime = next(iter(models), "")
+        model = entry.get("default_model") or (models.get(runtime) or [""])[0]
+        return {"runtime": runtime, "model": model, "selection": "fixed"} if runtime and model else None
+    route = ((entry.get("routing") or {}).get(tier) or {}).get("primary") or {}
+    if not route:
+        return None
+    return {"runtime": route.get("runtime", ""), "model": route.get("model", ""), "selection": "primary"}
+
+
+def table(team: Dict[str, Any]) -> None:
+    print(f"{'role':<14}{'tier':<10}{'runtime':<9}model")
+    for role in sorted((team.get("roles") or {}).keys()):
+        entry = team["roles"][role]
+        tiers = ("fixed",) if entry.get("model_selection") == "fixed" else TIERS
+        for tier in tiers:
+            route = route_of(team, role, tier)
+            if route is None:
+                print(f"{role:<14}{tier:<10}{'-':<9}-")
+            else:
+                print(f"{role:<14}{tier:<10}{route['runtime']:<9}{route['model']}")
+
+
+def allowlist(team: Dict[str, Any], role: str) -> Dict[str, List[str]]:
+    return ((team.get("roles") or {}).get(role) or {}).get("models") or {}
+
+
+def independence_warning(team: Dict[str, Any], tier: str, role: str = "") -> Optional[str]:
+    for writer in WRITERS:
+        for verifier in VERIFIERS:
+            if role and role not in (writer, verifier):
+                continue
+            left = route_of(team, writer, tier)
+            right = route_of(team, verifier, tier)
+            if left and right and (left["runtime"], left["model"]) == (right["runtime"], right["model"]):
+                return (f"{writer}/{tier} and {verifier}/{tier} would both run "
+                        f"{left['runtime']}/{left['model']}; a writer may not share its verifier's model")
+    return None
+
+
+def apply_route(overlay: Dict[str, Any], team: Dict[str, Any], role: str, tier: str,
+                runtime: str, model: str, allow_model: bool) -> None:
+    entry = ((team.get("roles") or {}).get(role) or {})
+    fixed = entry.get("model_selection") == "fixed"
+    role_overlay = overlay.setdefault("roles", {}).setdefault(role, {})
+    if fixed:
+        role_overlay.setdefault("models", {})[runtime] = [model]
+        role_overlay["default_model"] = model
+    else:
+        routing = role_overlay.setdefault("routing", {})
+        routing[tier] = {"primary": {"runtime": runtime, "model": model}, "alternates": []}
+    if allow_model:
+        models = role_overlay.setdefault("models", {})
+        current = list(models.get(runtime) or (entry.get("models") or {}).get(runtime) or [])
+        if model not in current:
+            current.append(model)
+        models[runtime] = current
+
+
+def validate(team: Dict[str, Any], tier: str, role: str = "") -> int:
+    # A writer and a verifier sharing a model is legal in the shipped roster (the
+    # resolver substitutes or raises the tier), so this is advice, not a refusal.
+    warning = independence_warning(team, tier, role)
+    if warning:
+        print(f"hteam-model: note: {warning}", file=sys.stderr)
+    if TEAM_CONFIG is None:
+        return 0
+    result = run([TEAM_CONFIG, "validate"], timeout=120)
+    if result.returncode == 3:
+        print("hteam-model: the resulting roster has routes that cannot launch:", file=sys.stderr)
+        print((result.stderr or result.stdout).strip(), file=sys.stderr)
+        return 3
+    if result.returncode != 0:
+        print((result.stderr or result.stdout).strip(), file=sys.stderr)
+        return 1
+    return 0
+
+
+def commit(overlay_path: Path, overlay: Dict[str, Any], tier: str, role: str) -> int:
+    backup = overlay_path.read_text(encoding="utf-8") if overlay_path.is_file() else None
+    write_overlay(overlay_path, overlay)
+    render = run([TEAM_CONFIG, "render"], timeout=30)
+    if render.returncode != 0:
+        fail(f"render failed: {render.stderr.strip()}")
+    team = effective_team()
+    code = validate(team, tier, role)
+    if code != 0:
+        if backup is None:
+            overlay_path.unlink(missing_ok=True)
+        else:
+            overlay_path.write_text(backup, encoding="utf-8")
+        run([TEAM_CONFIG, "render"], timeout=30)
+        print("hteam-model: change reverted", file=sys.stderr)
+    return code
+
+
+def interactive(team: Dict[str, Any], overlay_path: Path, overlay: Dict[str, Any]) -> int:
+    roles = sorted((team.get("roles") or {}).keys())
+    while True:
+        print()
+        table(team)
+        print(f"\noverlay: {overlay_path}")
+        raw = input("Edit which role? (name, or Enter to finish): ").strip()
+        if not raw:
+            return 0
+        if raw not in roles:
+            print("  unknown role")
+            continue
+        fixed = (team["roles"][raw] or {}).get("model_selection") == "fixed"
+        tier = "fixed"
+        if not fixed:
+            print("  tier: 1 standard, 2 critical [1]")
+            choice = input("  tier: ").strip() or "1"
+            tier = TIERS[0] if choice in ("1", "standard") else TIERS[1]
+        allowed = allowlist(team, raw)
+        if not allowed:
+            print("  this role has no model allowlist")
+            continue
+        runtimes = sorted(allowed)
+        print(f"  runtime: {', '.join(runtimes)} [{runtimes[0]}]")
+        runtime = input("  runtime: ").strip() or runtimes[0]
+        if runtime not in allowed:
+            print("  not an allowlisted runtime for this role")
+            continue
+        models = list(allowed.get(runtime) or [])
+        for index, model in enumerate(models, start=1):
+            print(f"    {index}. {model}")
+        print("  model: number, or type a model id")
+        answer = input("  model: ").strip()
+        allow_model = False
+        if answer.isdigit() and 1 <= int(answer) <= len(models):
+            model = models[int(answer) - 1]
+        elif answer:
+            model = answer
+            allow_model = model not in models
+            if allow_model:
+                print(f"  {model} is not in {runtime}'s allowlist; it will be added to the overlay")
+        else:
+            print("  no model given")
+            continue
+        apply_route(overlay, team, raw, tier, runtime, model, allow_model)
+        code = commit(overlay_path, overlay, tier, raw)
+        if code != 0:
+            overlay = read_overlay(overlay_path)
+            continue
+        team = effective_team()
+        print(f"  pinned {raw}/{tier} to {runtime}/{model}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="hteam-model", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--json", action="store_true", help="print the effective routing table")
+    parser.add_argument("--set", nargs=4, metavar=("ROLE", "TIER", "RUNTIME", "MODEL"),
+                        help="pin one route without prompting")
+    parser.add_argument("--unset", nargs=2, metavar=("ROLE", "TIER"), help="drop one override")
+    parser.add_argument("--reset", action="store_true", help="remove every override")
+    parser.add_argument("--allow-model", nargs=2, metavar=("RUNTIME", "MODEL"),
+                        help="add a model to an overlay route's allowlist as part of --set")
+    args = parser.parse_args()
+
+    if TEAM_CONFIG is None:
+        fail("team-config is not installed (run setup_harness.sh)")
+
+    base, overlay_path, effective = paths()
+
+    if args.reset:
+        result = run([TEAM_CONFIG, "reset"], timeout=30)
+        print((result.stdout or result.stderr).strip())
+        return result.returncode
+
+    team = effective_team()
+
+    if args.json:
+        routing = {}
+        for role in sorted((team.get("roles") or {}).keys()):
+            entry = team["roles"][role]
+            tiers = ("fixed",) if entry.get("model_selection") == "fixed" else TIERS
+            routing[role] = {tier: route_of(team, role, tier) for tier in tiers}
+        print(json.dumps({
+            "schema": 1,
+            "base": str(base),
+            "overlay": str(overlay_path),
+            "effective": str(effective),
+            "overlay_present": overlay_path.is_file(),
+            "roles": routing,
+        }, indent=2))
+        return 0
+
+    overlay = read_overlay(overlay_path)
+
+    if args.unset:
+        role, tier = args.unset
+        roles = overlay.get("roles") or {}
+        if role in roles:
+            if tier == "fixed":
+                roles[role].pop("default_model", None)
+                roles[role].pop("models", None)
+            else:
+                (roles[role].get("routing") or {}).pop(tier, None)
+            if not any(value for value in roles[role].values()):
+                roles.pop(role)
+            elif not roles[role].get("routing"):
+                roles[role].pop("routing", None)
+            elif not roles[role].get("models"):
+                roles[role].pop("models", None)
+        write_overlay(overlay_path, overlay)
+        run([TEAM_CONFIG, "render"], timeout=30)
+        print(f"hteam-model: removed the {role}/{tier} override")
+        return 0
+
+    if args.set:
+        role, tier, runtime, model = args.set
+        if role not in (team.get("roles") or {}):
+            fail(f"unknown role '{role}'")
+        if tier not in TIERS and tier != "fixed":
+            fail(f"tier must be standard, critical, or fixed, got '{tier}'")
+        if tier != "fixed" and runtime not in allowlist(team, role):
+            fail(f"{runtime} is not an allowlisted runtime for {role} "
+                 f"(allowlist: {', '.join(sorted(allowlist(team, role))) or 'none'})")
+        if tier != "fixed" and not args.allow_model and model not in (allowlist(team, role).get(runtime) or []):
+            fail(f"{model} is not on {runtime}'s allowlist for {role}; "
+                 f"pass --allow-model {runtime} {model} to add it")
+        if args.allow_model:
+            allow_runtime, allow_value = args.allow_model
+            overlay.setdefault("roles", {}).setdefault(role, {}).setdefault("models", {})
+            current = list((overlay["roles"][role]["models"].get(allow_runtime)
+                            or allowlist(team, role).get(allow_runtime) or []))
+            if allow_value not in current:
+                current.append(allow_value)
+            overlay["roles"][role]["models"][allow_runtime] = current
+        apply_route(overlay, team, role, tier, runtime, model, bool(args.allow_model))
+        return commit(overlay_path, overlay, tier if tier != "fixed" else TIERS[0], role)
+
+    if not sys.stdin.isatty():
+        table(team)
+        print(f"\noverlay: {overlay_path}")
+        print("hteam-model: interactive mode needs a TTY; use --set, --unset, --reset, or --json",
+              file=sys.stderr)
+        return 2
+
+    return interactive(team, overlay_path, overlay)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Layered team config: the shipped roster plus a machine-local overlay.
+
+`config/team.json` is the canonical allowlist and routing policy. A machine may
+overlay `~/.config/herdr-team/team.local.json` to pin its own models without
+editing the shipped file — which `npx skills update` would overwrite, and which
+the old symlink let a local edit dirty in Git.
+
+Merge rules:
+  - objects merge recursively
+  - lists replace
+  - scalars replace
+  - an overlay may not introduce a role the canonical file does not have
+  - `version` must match the canonical file
+
+Usage
+  team-config show [--json]      effective roster (no write)
+  team-config render             write the effective roster, atomically
+  team-config validate           every role x tier must still resolve
+  team-config paths              base, overlay, effective, and their state
+  team-config reset              remove the overlay, then re-render
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List
+
+SCHEMA_VERSION = 4
+
+
+def fail(message: str, code: int = 2) -> "None":
+    print(f"team-config: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def base_path() -> Path:
+    override = os.environ.get("HERDR_TEAM_BASE", "")
+    if override:
+        return Path(override).expanduser()
+    skill = os.environ.get("HERDR_AGENT_TEAM_SKILL_DIR", "")
+    if skill:
+        candidate = Path(skill).expanduser() / "config" / "team.json"
+        if candidate.is_file():
+            return candidate
+    installed = Path.home() / ".agents" / "skills" / "herdr-agent-team" / "config" / "team.json"
+    if installed.is_file():
+        return installed
+    # A payload checkout: scripts/ sits next to config/.
+    return Path(__file__).resolve().parent.parent / "config" / "team.json"
+
+
+def overlay_path() -> Path:
+    override = os.environ.get("HERDR_TEAM_LOCAL", "")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".config" / "herdr-team" / "team.local.json"
+
+
+def effective_path() -> Path:
+    """The file the launchers read: the merged roster, not the shipped copy."""
+    override = os.environ.get("HERDR_TEAM_EFFECTIVE", "")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".agents" / "team.json"
+
+
+def read_json(path: Path, what: str, required: bool = True) -> Dict[str, Any]:
+    if not path.is_file():
+        if required:
+            fail(f"{what} not found: {path}", 2)
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"{what} is not valid JSON: {path} ({error})", 2)
+    if not isinstance(value, dict):
+        fail(f"{what} must be a JSON object: {path}", 2)
+    return value
+
+
+def merge(base: Any, overlay: Any, trail: str = "") -> Any:
+    """Objects merge, everything else replaces."""
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        result = copy.deepcopy(base)
+        for key, value in overlay.items():
+            result[key] = merge(base.get(key), value, f"{trail}.{key}" if trail else key)
+        return result
+    return copy.deepcopy(overlay)
+
+
+def load_overlay() -> Dict[str, Any]:
+    overlay = read_json(overlay_path(), "overlay", required=False)
+    if not overlay:
+        return {}
+    if "version" in overlay and overlay["version"] != SCHEMA_VERSION:
+        fail(f"overlay version must be {SCHEMA_VERSION}, got {overlay['version']!r}")
+    roles = overlay.get("roles")
+    if roles is not None and not isinstance(roles, dict):
+        fail("overlay roles must be an object")
+    return overlay
+
+
+def effective() -> Dict[str, Any]:
+    base = read_json(base_path(), "canonical team.json")
+    if base.get("version") != SCHEMA_VERSION:
+        fail(f"canonical team.json must be version {SCHEMA_VERSION}, got {base.get('version')!r}")
+    overlay = load_overlay()
+    merged = merge(base, overlay) if overlay else base
+    known = set((base.get("roles") or {}).keys())
+    for role in (merged.get("roles") or {}):
+        if role not in known:
+            fail(f"overlay names unknown role '{role}' (canonical roles: {', '.join(sorted(known))})")
+    return merged
+
+
+def check_routes(team: Dict[str, Any]) -> List[str]:
+    roster = Path(__file__).resolve().parent / "roster"
+    if not roster.is_file():
+        fail(f"roster not found next to team-config: {roster}")
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, prefix="team.")
+    try:
+        json.dump(team, handle)
+        handle.close()
+        stuck = []
+        for role in sorted((team.get("roles") or {}).keys()):
+            for tier in ("standard", "critical"):
+                result = subprocess.run(
+                    [sys.executable, str(roster), "--team", handle.name, role, tier],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 3:
+                    stuck.append(f"{role}/{tier}: {result.stdout.strip().splitlines()[0] if result.stdout.strip() else 'no launchable pair'}")
+        return stuck
+    finally:
+        os.unlink(handle.name)
+
+
+def render(team: Dict[str, Any]) -> Path:
+    target = effective_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    plain = dict(team)
+    plain.setdefault("_generated", "team-config: canonical + team.local.json overlay")
+    payload = json.dumps(plain, indent=2, sort_keys=False) + "\n"
+    handle = tempfile.NamedTemporaryFile("w", dir=str(target.parent), delete=False,
+                                         prefix=".team.", suffix=".tmp")
+    try:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    finally:
+        handle.close()
+    os.chmod(handle.name, 0o644)
+    os.replace(handle.name, target)
+    return target
+
+
+def print_paths() -> Dict[str, str]:
+    base, overlay, target = base_path(), overlay_path(), effective_path()
+    for label, path in (("base", base), ("overlay", overlay), ("effective", target)):
+        state = "present" if path.is_file() else "missing"
+        print(f"{label:<10} {path}  ({state})")
+    print(f"stale      {'yes' if target.is_file() and target.stat().st_mtime < base.stat().st_mtime else 'no'}")
+    return {"base": str(base), "overlay": str(overlay), "effective": str(target)}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="team-config", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    show = sub.add_parser("show", help="print the effective roster")
+    show.add_argument("--json", action="store_true")
+    sub.add_parser("render", help="write the effective roster")
+    sub.add_parser("validate", help="check every role x tier still resolves")
+    paths = sub.add_parser("paths", help="show base, overlay, and effective paths")
+    paths.add_argument("--json", action="store_true")
+    sub.add_parser("reset", help="remove the overlay and re-render")
+
+    args = parser.parse_args()
+
+    if args.command == "paths":
+        values = print_paths()
+        if args.json:
+            print(json.dumps(values, indent=2))
+        return 0
+
+    if args.command == "reset":
+        overlay = overlay_path()
+        if overlay.is_file():
+            overlay.unlink()
+            print(f"team-config: removed {overlay}")
+        else:
+            print(f"team-config: no overlay at {overlay}")
+        render(effective())
+        print(f"team-config: re-rendered {effective_path()}")
+        return 0
+
+    team = effective()
+
+    if args.command == "show":
+        print(json.dumps(team, indent=2, sort_keys=False) if args.json
+              else f"{len(team.get('roles') or {})} roles · overlay: "
+                   f"{'yes' if load_overlay() else 'no'} ({overlay_path()})")
+        return 0
+
+    if args.command == "render":
+        target = render(team)
+        print(f"team-config: wrote {target}")
+        return 0
+
+    if args.command == "validate":
+        stuck = check_routes(team)
+        if stuck:
+            print("team-config: routes cannot launch:", file=sys.stderr)
+            for line in stuck:
+                print(f"  {line}", file=sys.stderr)
+            return 3
+        roles = len(team.get("roles") or {})
+        print(f"team-config: ok ({roles * 2} routes resolve)")
+        return 0
+
+    parser.error("unknown command")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

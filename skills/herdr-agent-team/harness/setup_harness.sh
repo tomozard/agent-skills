@@ -176,10 +176,24 @@ if [ -z "$CANON_TEAM" ]; then
     [ -f "$candidate" ] && { CANON_TEAM="$candidate"; break; }
   done
 fi
-if [ -n "$CANON_TEAM" ] && [ -f "$CANON_TEAM" ]; then
-  ln -sfn "$CANON_TEAM" "$HOME/.agents/team.json"
+# The installed team.json is the *effective* roster: canonical file plus the
+# machine overlay at ~/.config/herdr-team/team.local.json. Materialising it here
+# (instead of symlinking to the canonical file) means `hteam model` can pin a
+# model without editing the repository, and `npx skills update` cannot revert it.
+TEAM_CONFIG_BIN="$SKILL_SCRIPTS/team-config"
+if [ -x "$TEAM_CONFIG_BIN" ] && python3 -c 'import sys' >/dev/null 2>&1; then
+  if [ -n "$CANON_TEAM" ] && [ -f "$CANON_TEAM" ]; then
+    HERDR_TEAM_BASE="$CANON_TEAM" "$TEAM_CONFIG_BIN" render >/dev/null
+  else
+    HERDR_TEAM_BASE="$SOURCE/team.json" "$TEAM_CONFIG_BIN" render >/dev/null
+  fi
+  echo "  team.json: effective roster rendered (canonical + team.local.json)"
 else
-  copy_file "$SOURCE/team.json" "$HOME/.agents/team.json"
+  if [ -n "$CANON_TEAM" ] && [ -f "$CANON_TEAM" ]; then
+    ln -sfn "$CANON_TEAM" "$HOME/.agents/team.json"
+  else
+    copy_file "$SOURCE/team.json" "$HOME/.agents/team.json"
+  fi
 fi
 copy_file "$ROOT/AGENTS.md" "$HOME/.agents/agents.md"
 copy_dir "$ROOT/bin/guard-bin" "$HOME/.agents/guard-bin"
@@ -268,7 +282,7 @@ if [ -f "$BIN_MANIFEST" ]; then
   done < "$BIN_MANIFEST"
 fi
 : > "$BIN_MANIFEST"
-for binary in herdr-team agent-runtime spawn-agent verify-pane-agent agent-team-shutdown validate-okf voice-notify task-board workflow-shape herdr-app-team herdr-app-spawn-role hteam-dispatch hteam-config hteam-health hteam-setup tts-speak-omni clickup-status; do
+for binary in herdr-team agent-runtime spawn-agent verify-pane-agent agent-team-shutdown validate-okf voice-notify task-board workflow-shape herdr-app-team herdr-app-spawn-role hteam-dispatch hteam-config hteam-health hteam-setup hteam-model tts-speak-omni clickup-status; do
   copy_file "$ROOT/bin/$binary" "$HOME/bin/$binary"
   chmod +x "$HOME/bin/$binary"
   echo "$binary" >> "$BIN_MANIFEST"

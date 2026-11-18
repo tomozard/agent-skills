@@ -333,6 +333,20 @@ def check_policy(report: Report, skill: Path, team_path: Path) -> None:
     else:
         report.add("policy", "routes", "ok", f"{total}/{total} role/tier routes resolve")
 
+    overlay = Path(os.environ.get("HERDR_TEAM_LOCAL", "")).expanduser() \
+        if os.environ.get("HERDR_TEAM_LOCAL") else Path.home() / ".config" / "herdr-team" / "team.local.json"
+    if overlay.is_file():
+        try:
+            json.loads(overlay.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            report.add("policy", "overlay", "fail", f"invalid JSON: {overlay} ({error})",
+                       "fix ~/.config/herdr-team/team.local.json or run: hteam model --reset")
+        else:
+            report.add("policy", "overlay", "ok", str(overlay))
+    else:
+        report.add("policy", "overlay", "skip", "no machine overlay",
+                   "hteam model pins a route without editing the shipped roster")
+
     disabled = team.get("disabled_model_providers") or []
     if disabled:
         report.add("policy", "disabled-providers", "warn", ", ".join(disabled),
