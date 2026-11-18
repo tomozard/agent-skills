@@ -43,9 +43,21 @@ def fail(message: str, code: int = 2) -> "None":
 
 
 def tool(name: str, *extra: Path) -> Optional[Path]:
+    """Find a sibling tool, a skill script, or an installed command.
+
+    The payload runs from three layouts: the repository (harness/bin next to
+    scripts/), a temporary copy the installer validates, and ~/bin after install.
+    Only the first had scripts/ two levels up, so an installed `hteam model`
+    could not find team-config. Search the skill scripts and PATH as well.
+    """
+    skill_scripts = Path(os.environ.get(
+        "HERDR_AGENT_TEAM_SCRIPTS",
+        str(Path.home() / ".agents" / "skills" / "herdr-agent-team" / "scripts"),
+    )).expanduser()
     for candidate in (HERE / name,
                       HERE.parent / "scripts" / name,
                       HERE.parent.parent / "scripts" / name,
+                      skill_scripts / name,
                       *extra):
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate

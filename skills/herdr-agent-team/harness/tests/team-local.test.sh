@@ -6,7 +6,25 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SKILL="$(cd "$ROOT/.." && pwd)"
+
+# The installer validates a copy of this payload at a temporary root, where
+# ROOT/.. is not the skill. Prefer the skill that owns this payload, then the
+# installed one, and skip only when no skill exists at all.
+resolve_skill() {
+  for candidate in "${HERDR_AGENT_TEAM_SKILL_DIR:-}" "$ROOT/.." \
+                   "$HOME/.agents/skills/herdr-agent-team"; do
+    [ -n "$candidate" ] && [ -x "$candidate/scripts/team-config" ] \
+      && (cd "$candidate" && pwd) && return 0
+  done
+  return 1
+}
+SKILL="$(resolve_skill)" || {
+  echo "  skip  the skill scripts are not installed; this suite needs them"
+  exit 0
+}
+# The tools resolve team-config through this variable; a payload copy at a temp
+# root has no scripts/ of its own, so point them at the skill explicitly.
+export HERDR_AGENT_TEAM_SCRIPTS="$SKILL/scripts"
 TEAM_CONFIG="$SKILL/scripts/team-config"
 MODEL="$ROOT/bin/hteam-model"
 BASE="$SKILL/config/team.json"
@@ -162,7 +180,20 @@ else
 fi
 ok "interactive mode is refused without a TTY"
 
-# 11. --json is a single machine-readable document.
+# 11. The tool also works from ~/bin, where scripts/ is not two levels up.
+mkdir -p "$TMP/installed-bin"
+cp "$MODEL" "$TMP/installed-bin/hteam-model"
+"$TMP/installed-bin/hteam-model" --json > "$TMP/installed.json" 2>"$TMP/installed.err" \
+  || fail "hteam-model cannot find team-config when installed ($(cat "$TMP/installed.err"))"
+python3 - "$TMP/installed.json" <<'PY' || fail "the installed layout produced no table"
+import json
+import sys
+
+assert "coder" in json.load(open(sys.argv[1], encoding="utf-8"))["roles"]
+PY
+ok "the installed layout resolves team-config"
+
+# 12. --json is a single machine-readable document.
 "$MODEL" --json > "$TMP/model.json" || fail "--json failed"
 python3 - "$TMP/model.json" <<'PY' || fail "--json is not the documented shape"
 import json

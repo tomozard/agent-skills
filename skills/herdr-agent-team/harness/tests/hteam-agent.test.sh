@@ -4,7 +4,25 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SKILL="$(cd "$ROOT/.." && pwd)"
+
+# The installer validates a copy of this payload at a temporary root, where
+# ROOT/.. is not the skill. Prefer the skill that owns this payload, then the
+# installed one, and skip only when no skill exists at all.
+resolve_skill() {
+  for candidate in "${HERDR_AGENT_TEAM_SKILL_DIR:-}" "$ROOT/.." \
+                   "$HOME/.agents/skills/herdr-agent-team"; do
+    [ -n "$candidate" ] && [ -x "$candidate/scripts/team-config" ] \
+      && (cd "$candidate" && pwd) && return 0
+  done
+  return 1
+}
+SKILL="$(resolve_skill)" || {
+  echo "  skip  the skill scripts are not installed; this suite needs them"
+  exit 0
+}
+# The tools resolve team-config through this variable; a payload copy at a temp
+# root has no scripts/ of its own, so point them at the skill explicitly.
+export HERDR_AGENT_TEAM_SCRIPTS="$SKILL/scripts"
 AGENT="$ROOT/bin/hteam-agent"
 TEAM_CONFIG="$SKILL/scripts/team-config"
 RESOLVER="$SKILL/scripts/workflow-shape"
