@@ -50,6 +50,7 @@ npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-
 | An agent acting for you | **[Agent install runbook](https://tomozard.github.io/agent-skills/agent-install.html)** — exact steps and failure handling |
 | Only reading files | [`docs/agent-install.md`](docs/agent-install.md) · [`docs/llms.txt`](docs/llms.txt) |
 | Changing the policy | [`SKILL.md`](skills/herdr-agent-team/SKILL.md) · [`setup.md`](skills/herdr-agent-team/setup.md) |
+| Cutting a release | [`docs/releasing.md`](docs/releasing.md) — bump, tag, staged publish, verify |
 
 ## Other skills
 

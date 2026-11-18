@@ -525,6 +525,7 @@ Authoritative, in the repository:
 | [references/runtime-adapters.md](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/references/runtime-adapters.md) | the six runtime verbs and how each CLI is driven |
 | [references/communication-protocol.md](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/references/communication-protocol.md) | messages, verdicts, dispatch accounting |
 | [harness/README.md](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/harness/README.md) | the runtime payload and its architecture |
+| [docs/releasing.md](https://github.com/tomozard/agent-skills/blob/main/docs/releasing.md) | how a release is cut, published, and picked up |
 
 Known gaps, in priority order:
 
