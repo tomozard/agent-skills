@@ -1,0 +1,44 @@
+# Herdr Agent Team
+
+> A delivery team of AI agents for real repositories: staffing, scope, and the
+> commit gate are decided by rules instead of by whoever holds the conversation.
+> Requires macOS and the Herdr desktop app; one command installs the skill and its
+> runtime.
+
+Install, then verify:
+
+    npx -y github:tomozard/agent-skills --yes
+    hteam check --deep
+    hteam
+
+## Start here
+
+- [Human guide](https://tomozard.github.io/agent-skills/): what it is, requirements, install, components, team shapes, model routing, daily use, troubleshooting.
+- [Agent install runbook](https://tomozard.github.io/agent-skills/agent-install.html): self-contained steps for an agent acting on a Human's behalf — preflight, install, configure, register projects, hand off.
+- [Policy entry point](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/SKILL.md): the four rules, the flow, the gates.
+- [Setup phases](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/setup.md): the interactive install/configure conversation, question by question.
+
+## Commands
+
+- `hteam`: start or report the Orchestrator in the Herdr app.
+- `hteam check [--deep]`: prerequisites, then installed-artifact integrity.
+- `hteam-config show|get|set|validate|path`: per-machine config at `~/.config/herdr-team/hteam.yaml`.
+- `hteam-dispatch <role> --brief F --request "…" --risk low`: intake, resolve, spawn in one call.
+- `workflow-shape --list`: the eleven task shapes (`W0`–`W10`).
+- `task-board create|show|list|event|transition`: the durable task board.
+- `roster ROLE TIER`: the runtime and model a role resolves to.
+- `runtime-probe`: which agent CLIs exist here and which verbs they support.
+- `validate-okf [ROOT]`: validate the OKF contract of Markdown files.
+
+## Components
+
+- [Launcher reference](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/references/launcher.md): `hteam`, config keys, voice engine, failure modes.
+- [Team at a glance](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/references/team-at-a-glance.md): authority layers, delivery stages, shapes, Human gates.
+- [Workflow shapes](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/references/workflow-shapes.md): intake fields, tiers, escalation, the micro-config lane.
+- [Runtime adapters](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/references/runtime-adapters.md): the six verbs and how Pi and Claude are driven.
+- [Communication protocol](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/references/communication-protocol.md): messages, verdicts, dispatch accounting.
+- [Runtime payload](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/harness/README.md): what the installer puts on the machine.
+
+## Optional
+
+- [Task board and verification gates](https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/harness/README.md): the frozen-diff SHA-256 contract in detail.

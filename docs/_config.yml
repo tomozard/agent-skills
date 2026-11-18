@@ -1,0 +1,19 @@
+title: Herdr Agent Team
+description: A multi-agent delivery team for real repositories — enforceable staffing, a frozen-diff verification gate, and human commit tokens.
+url: https://tomozard.github.io
+baseurl: /agent-skills
+
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
+  syntax_highlighter: none
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+exclude:
+  - check.sh

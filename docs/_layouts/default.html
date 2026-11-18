@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}</title>
+  <meta name="description" content="{{ site.description }}">
+  <meta property="og:title" content="{% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}">
+  <meta property="og:description" content="{{ site.description }}">
+  <link rel="stylesheet" href="{{ '/assets/style.css' | relative_url }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="{{ '/index.html' | relative_url }}">
+      <span class="brand-mark">◆</span> Herdr Agent Team
+    </a>
+    <nav class="site-nav">
+      <a href="{{ '/index.html' | relative_url }}">Guide</a>
+      <a href="{{ '/agent-install.html' | relative_url }}">Agent install</a>
+      <a href="{{ '/llms.txt' | relative_url }}">llms.txt</a>
+      <a href="https://github.com/tomozard/agent-skills">GitHub</a>
+    </nav>
+  </header>
+
+  <main class="site-main">
+    {{ content }}
+  </main>
+
+  <footer class="site-footer">
+    <p>
+      MIT licensed ·
+      <a href="https://github.com/tomozard/agent-skills">source</a> ·
+      <a href="https://github.com/tomozard/agent-skills/blob/main/skills/herdr-agent-team/SKILL.md">policy</a> ·
+      requires the Herdr desktop app on macOS
+    </p>
+  </footer>
+</body>
+</html>
