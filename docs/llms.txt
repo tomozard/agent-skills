@@ -2,8 +2,9 @@
 
 > A delivery team of AI agents for real repositories: staffing, scope, and the
 > commit gate are decided by rules instead of by whoever holds the conversation.
-> Requires macOS and the Herdr desktop app; one command installs the skill and its
-> runtime.
+> Requires the Herdr desktop app (macOS, Linux, and Windows from
+> https://herdr.dev/download/) and, for this harness today, macOS; one command
+> installs the skill and its runtime.
 
 Install, then verify:
 

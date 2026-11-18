@@ -28,7 +28,15 @@ Back to the [human guide](index.html).
 6. **`HERDR_ENV=1` is required** before any Herdr control command, and only panes
    inside Herdr may run them. The launcher is the only startup exception.
 
-## Step 0 — Preflight
+## Step 0 — Herdr, then preflight
+
+Herdr is a separate product and this skill never installs it. If it is missing,
+give the Human the download page (<https://herdr.dev/download/>) and the official
+one-liner — macOS/Linux `curl -fsSL https://releases.herdr.dev/app/install.sh | sh`,
+Windows `irm https://releases.herdr.dev/app/install.ps1 | iex` — then stop until
+they confirm it is installed and opened once.
+
+Run the preflight below only after that.
 
 Run all of it, then report every failure together. Do not start installing until
 the block is clean.
@@ -46,8 +54,8 @@ case ":$PATH:" in *":$HOME/bin:"*) echo "PATH ok";; *) echo "PATH missing ~/bin"
 
 | Result | Meaning | Action |
 |---|---|---|
-| `uname -s` is not `Darwin` | the app runtime is macOS-only | stop; report that the team needs macOS + Herdr |
-| `herdr-app` or `herdr-core` missing | Herdr.app is not installed, or was never opened | stop; ask the Human to install and open Herdr.app once |
+| `uname -s` is not `Darwin` | this harness is macOS-only today (Herdr itself also runs on Linux and Windows) | stop; report that the harness needs macOS |
+| `herdr-app` or `herdr-core` missing | Herdr is not installed, or was never opened | give the Human <https://herdr.dev/download/>; macOS/Linux `curl -fsSL https://releases.herdr.dev/app/install.sh \| sh`, Windows `irm https://releases.herdr.dev/app/install.ps1 \| iex`; open Herdr once; stop until both binaries exist |
 | `pi` missing | the Orchestrator and PM run on Pi | stop; ask the Human to install and authenticate Pi |
 | `claude` missing | critical routes lose their primary | continue, but tell the Human: some `critical` work will be `[STUCK]` |
 | node < 18 | `npx` cannot install the skill layer | stop; ask for a Node upgrade |
@@ -183,7 +191,7 @@ Handoff message template (Thai):
 | Symptom | Cause | Action |
 |---|---|---|
 | `PyYAML is missing` | interpreter without PyYAML | `python3 -m pip install --user pyyaml`, re-run |
-| `herdr-app not found` | Herdr.app absent or never opened | stop, ask the Human |
+| `herdr-app not found` | Herdr absent or never opened | stop, give the Human <https://herdr.dev/download/> and the installer line from Step 0 |
 | `Herdr app window is not reachable` | app closed | open Herdr.app, re-run `hteam check` |
 | `pi CLI not found` | no Pi runtime | stop, ask the Human |
 | `the agent-skills tooling is missing` | skill layer not installed | run `npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-code`, then the installer |

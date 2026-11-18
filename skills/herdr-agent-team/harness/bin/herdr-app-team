@@ -146,8 +146,16 @@ esac
 # ============================================================================
 # prerequisites
 # ============================================================================
-[ -x "$APP" ] || die "herdr-app not found (install Herdr.app, then open it once)"
-[ -x "$HC" ]  || die "herdr-core (hc) not found"
+HERDR_DOWNLOAD="https://herdr.dev/download/"
+HERDR_INSTALL_MAC_LINUX="curl -fsSL https://releases.herdr.dev/app/install.sh | sh"
+HERDR_INSTALL_WINDOWS="irm https://releases.herdr.dev/app/install.ps1 | iex"
+[ -x "$APP" ] || die "herdr-app not found
+  install Herdr, then open it once: $HERDR_DOWNLOAD
+  macOS/Linux: $HERDR_INSTALL_MAC_LINUX
+  Windows:     $HERDR_INSTALL_WINDOWS   (this harness is macOS-only today)"
+[ -x "$HC" ]  || die "herdr-core (hc) not found
+  Herdr installs it; open the app once, or see https://herdr.dev/core/
+  if the app is installed, re-run its installer so herdr-core lands in ~/.local/bin"
 [ -r "$REGISTRY" ] || die "workspace registry not readable: $REGISTRY (set HERDR_TEAM_REGISTRY)"
 command -v pi >/dev/null 2>&1 || die "pi CLI not found (this runtime drives Pi via agent-runtime)"
 [ -x "$REPO/bin/agent-runtime" ] || die "missing $REPO/bin/agent-runtime (set HERDR_TEAM_REPO)"

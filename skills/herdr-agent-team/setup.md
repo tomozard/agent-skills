@@ -40,8 +40,16 @@ ls -l ~/.local/bin/herdr-app ~/.local/bin/herdr-core
 ```
 
 If any of the three is missing, stop and tell the Human: the team runs inside the
-Herdr desktop app and nothing in this skill installs it. Resume once the app is
-installed and `~/.local/bin/herdr-app` exists.
+Herdr desktop app and nothing in this skill installs it. Give the Human the
+install path instead:
+
+- download page: <https://herdr.dev/download/>
+- macOS/Linux: `curl -fsSL https://releases.herdr.dev/app/install.sh | sh`
+- Windows: `irm https://releases.herdr.dev/app/install.ps1 | iex` — but this
+  harness (bash launchers, voice helper) is macOS-only today, so stop there.
+
+The official installer also installs `herdr-core`; open the app once afterwards.
+Resume when `~/.local/bin/herdr-app` and `~/.local/bin/herdr-core` both exist.
 
 ## Phase 2 — which runtimes, and which one is primary
 

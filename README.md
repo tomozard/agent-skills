@@ -15,7 +15,8 @@ decided by rules instead of by whoever holds the conversation:
   helper may create the commit.
 - **The Human keeps four tokens.** Scope, commit, push, and PR.
 
-Requires macOS and the [Herdr](https://herdr.dev) desktop app, Pi, Node 18+, and
+Requires the [Herdr](https://herdr.dev/download/) desktop app (which ships for
+macOS, Linux, and Windows) plus macOS for this harness today, Pi, Node 18+, and
 Python 3 with PyYAML.
 
 ### Install

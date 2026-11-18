@@ -39,8 +39,8 @@ team, read **[Agent install](agent-install.html)** instead — it is the runbook
 
 | Requirement | Why | Check |
 |---|---|---|
-| macOS | The team runs inside the Herdr desktop app | `uname -s` |
-| Herdr.app installed and opened once | provides `herdr-app` and `herdr-core` | `ls -l ~/.local/bin/herdr-app ~/.local/bin/herdr-core` |
+| Herdr installed and opened once | the app plus `herdr-app` and `herdr-core`; Herdr itself ships for macOS, Linux, and Windows — [herdr.dev/download](https://herdr.dev/download/) | `ls -l ~/.local/bin/herdr-app ~/.local/bin/herdr-core` |
+| macOS | this harness is macOS-only today: bash launchers, `~/bin` PATH, and the voice helper (`afplay`) | `uname -s` |
 | Pi, authenticated | **required** — the Orchestrator and PM run on Pi, and the launcher refuses to start without it | `pi --version` |
 | Claude Code, authenticated | recommended — several `critical` routes have no Pi alternate | `claude --version` |
 | Node.js 18+ | `npx` installs the skill layer | `node --version` |
@@ -58,6 +58,27 @@ python3 -m pip install --user pyyaml
 ```
 
 ## Install
+
+### Step 0 — Herdr
+
+The team runs inside the Herdr desktop app, so install it first. It is free,
+open source, and self-updating; one line installs the app and `herdr-core`:
+
+```bash
+# macOS / Linux
+curl -fsSL https://releases.herdr.dev/app/install.sh | sh
+
+# Windows (PowerShell) — Herdr runs there, this harness does not (yet)
+irm https://releases.herdr.dev/app/install.ps1 | iex
+```
+
+Or download the app: <https://herdr.dev/download/>. Nothing in this skill installs
+Herdr for you: `hteam check` names the download page and stops.
+
+Then open Herdr once. `~/.local/bin/herdr-app` and `~/.local/bin/herdr-core` must
+both exist.
+
+### Step 1 — the team
 
 **One command.** It runs the policy layer, then the runtime layer, then a deep
 check:
@@ -401,7 +422,7 @@ force-push, delete a branch, or tag.
 | Symptom | Cause | Action |
 |---|---|---|
 | installer stops: `PyYAML is missing` | no PyYAML for this account | `python3 -m pip install --user pyyaml`, re-run |
-| `herdr-app not found` | Herdr.app not installed or never opened | install, open once, check `~/.local/bin/herdr-app` |
+| `herdr-app not found` | Herdr not installed or never opened | install from <https://herdr.dev/download/> (or the one-liner in Step 0), open once, check `~/.local/bin/herdr-app` |
 | `the Herdr app window is not reachable` | app closed | open Herdr.app and retry |
 | `pi CLI not found` | no Pi runtime | install Pi, or make sure it is on `PATH` |
 | `Already inside a team terminal` | the pane already runs a role | talk to that role's controller; do not open a second team |
