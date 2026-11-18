@@ -14,7 +14,18 @@
 # --allow-no-herdr installs the harness anyway (a machine that is being prepared).
 set -euo pipefail
 
-PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# npx runs this file through a symlink in node_modules/.bin, so resolve the real
+# path before walking up: otherwise ".." is node_modules and the payload is lost.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  SELF_DIR="$(cd -P "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in
+    /*) ;;
+    *) SELF="$SELF_DIR/$SELF" ;;
+  esac
+done
+PACKAGE_ROOT="$(cd -P "$(dirname "$SELF")/.." && pwd)"
 SKILL_REPO="tomozard/agent-skills/skills/herdr-agent-team"
 AGENTS="pi claude-code"
 SKILL_DIR="${HERDR_AGENT_TEAM_SKILL_DIR:-$HOME/.agents/skills/herdr-agent-team}"
