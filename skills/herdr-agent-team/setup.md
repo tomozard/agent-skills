@@ -250,8 +250,8 @@ project-scaffold clone:
 hteam-config set repo "$(cd ~/.agents/skills/herdr-agent-team/harness && pwd)"
 ```
 
-The installer places 56 artifacts: 16 binaries in `~/bin` (including the `hteam`
-symlink and `hteam-health`/`hteam-setup`/`hteam-model`), the role prompts in
+The installer places its artifacts: 18 binaries in `~/bin` (including the `hteam`
+alias and the `hteam-health`/`hteam-setup`/`hteam-model` tools), the role prompts in
 `~/.agents/agents`, `~/.agents/team.json` rendered from the canonical roster plus
 `~/.config/herdr-team/team.local.json`, the guard binaries, the extensions, the
 Claude agent definitions, `/hteam` for Pi, and the voice scripts.

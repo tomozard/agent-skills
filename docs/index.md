@@ -109,7 +109,7 @@ What that does, in order:
 1. `npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-code`
    — the skill: policy, references, the resolver and the task board.
 2. `~/.agents/skills/herdr-agent-team/harness/setup_harness.sh`
-   — the runtime: 15 commands into `~/bin`, 12 role files, 5 Pi extensions, Claude
+   — the runtime: 18 commands into `~/bin`, 12 role files, 5 Pi extensions, Claude
    agent files, guards, `team.json`, and a `/hteam` command for Pi.
 3. `hteam check --deep` — verifies every installed artifact against the payload.
 
