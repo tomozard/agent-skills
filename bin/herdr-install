@@ -7,6 +7,11 @@
 # wrapper runs both layers: `npx skills add` for the policy layer, then the
 # payload's own setup_harness.sh for the runtime layer. The Human orders the
 # install by passing --yes; without it only the plan is printed.
+#
+# Before anything is written it checks that Herdr is installed, because the team
+# runs inside the Herdr desktop app and this skill installs Herdr for nobody. A
+# missing Herdr prints the download page and the official installer and exits 3;
+# --allow-no-herdr installs the harness anyway (a machine that is being prepared).
 set -euo pipefail
 
 SKILL_REPO="tomozard/agent-skills/skills/herdr-agent-team"
@@ -20,17 +25,21 @@ LOG_FILE="$LOG_DIR/install.log"
 SKIP_VALIDATE=0
 ASSUME_YES=0
 DRY_RUN=0
+ALLOW_NO_HERDR=0
 
 usage() {
   cat <<'EOF'
-Usage: herdr-install [--yes] [--dry-run] [--skip-validate]
+Usage: herdr-install [--yes] [--dry-run] [--skip-validate] [--allow-no-herdr]
 
 Install the herdr-agent-team policy layer (npx skills add) and its runtime
 layer (the payload's setup_harness.sh), then verify with `hteam check --deep`.
 
-  --yes            run the install; without it only the plan is printed
-  --dry-run        print the plan and exit
-  --skip-validate  skip tests/validate.sh (only after machine-local routing edits)
+  --yes              run the install; without it only the plan is printed
+  --dry-run          print the plan and the Herdr preflight, exit 0
+  --skip-validate    skip tests/validate.sh (only after machine-local routing edits)
+  --allow-no-herdr   install even though the Herdr desktop app is missing
+
+Exit codes: 0 ok, 1 waiting for --yes, 2 bad arguments, 3 Herdr is missing.
 EOF
 }
 
@@ -39,6 +48,7 @@ while [ "$#" -gt 0 ]; do
     --yes|-y) ASSUME_YES=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --skip-validate) SKIP_VALIDATE=1 ;;
+    --allow-no-herdr) ALLOW_NO_HERDR=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "herdr-install: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -57,8 +67,74 @@ plan() {
   echo "  log: $LOG_FILE"
 }
 
+HERDR_DOWNLOAD="https://herdr.dev/download/"
+HERDR_INSTALL_MAC_LINUX="curl -fsSL https://releases.herdr.dev/app/install.sh | sh"
+HERDR_INSTALL_WINDOWS="irm https://releases.herdr.dev/app/install.ps1 | iex"
+
+find_herdr() {
+  HERDR_APP=""
+  HERDR_CORE=""
+  if [ -n "${HERDR_APP_BIN:-}" ]; then
+    HERDR_APP="$HERDR_APP_BIN"
+  elif [ -x "$HOME/.local/bin/herdr-app" ]; then
+    HERDR_APP="$HOME/.local/bin/herdr-app"
+  elif command -v herdr-app >/dev/null 2>&1; then
+    HERDR_APP="$(command -v herdr-app)"
+  fi
+  if [ -n "${HC_BIN:-}" ]; then
+    HERDR_CORE="$HC_BIN"
+  elif [ -x "$HOME/.local/bin/herdr-core" ]; then
+    HERDR_CORE="$HOME/.local/bin/herdr-core"
+  elif command -v herdr-core >/dev/null 2>&1; then
+    HERDR_CORE="$(command -v herdr-core)"
+  fi
+}
+
+herdr_version() {
+  "$1" --version 2>/dev/null | head -n 1 | awk '{print $NF}' || true
+}
+
+# Exit 3 when Herdr is missing. Writes nothing.
+preflight_herdr() {
+  find_herdr
+  local missing=0
+  echo "herdr-install: preflight"
+  if [ -n "$HERDR_APP" ] && [ -x "$HERDR_APP" ]; then
+    echo "  ok:   herdr-app $(herdr_version "$HERDR_APP") ($HERDR_APP)"
+  else
+    echo "  MISS: herdr-app (the team runs inside the Herdr desktop app)" >&2
+    missing=1
+  fi
+  if [ -n "$HERDR_CORE" ] && [ -x "$HERDR_CORE" ]; then
+    echo "  ok:   herdr-core $(herdr_version "$HERDR_CORE") ($HERDR_CORE)"
+  else
+    echo "  MISS: herdr-core (Herdr installs it when the app opens once)" >&2
+    missing=1
+  fi
+  [ "$missing" = 0 ] && return 0
+
+  cat >&2 <<EOF
+
+herdr-install: install Herdr first, then re-run this command
+  download:    $HERDR_DOWNLOAD
+  macOS/Linux: $HERDR_INSTALL_MAC_LINUX
+  Windows:     $HERDR_INSTALL_WINDOWS
+               (this harness is macOS-only today; Herdr itself runs there)
+  Open Herdr once afterwards so herdr-core is set up.
+  To install the harness anyway: herdr-install --yes --allow-no-herdr
+EOF
+  return 3
+}
+
 plan
+HERDR_RC=0
+preflight_herdr || HERDR_RC=$?
+if [ "$HERDR_RC" = 3 ] && [ "$ALLOW_NO_HERDR" = 1 ]; then
+  echo "herdr-install: continuing without Herdr (--allow-no-herdr)" >&2
+  HERDR_RC=0
+fi
 [ "$DRY_RUN" = 1 ] && exit 0
+[ "$HERDR_RC" = 3 ] && exit 3
 if [ "$ASSUME_YES" != 1 ]; then
   echo >&2
   echo "herdr-install: re-run with --yes to install (the Human orders this step)." >&2

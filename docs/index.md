@@ -73,10 +73,21 @@ irm https://releases.herdr.dev/app/install.ps1 | iex
 ```
 
 Or download the app: <https://herdr.dev/download/>. Nothing in this skill installs
-Herdr for you: `hteam check` names the download page and stops.
+Herdr for you: the installer's preflight and `hteam check` name the download page
+and stop.
 
 Then open Herdr once. `~/.local/bin/herdr-app` and `~/.local/bin/herdr-core` must
-both exist.
+both exist. `npx … --yes` verifies this before it writes anything:
+
+```text
+herdr-install: preflight
+  ok:   herdr-app 0.1.16 (/Users/you/.local/bin/herdr-app)
+  ok:   herdr-core 0.1.21 (/Users/you/.local/bin/herdr-core)
+```
+
+If either line is `MISS`, the installer prints the two commands above and exits
+`3` without touching `$HOME`. `--allow-no-herdr` installs the harness anyway, for a
+machine that is being prepared.
 
 ### Step 1 — the team
 

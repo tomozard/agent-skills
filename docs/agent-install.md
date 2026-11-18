@@ -36,6 +36,10 @@ one-liner — macOS/Linux `curl -fsSL https://releases.herdr.dev/app/install.sh 
 Windows `irm https://releases.herdr.dev/app/install.ps1 | iex` — then stop until
 they confirm it is installed and opened once.
 
+`npx … --yes` enforces this itself: it prints `herdr-install: preflight`, and a
+`MISS` line stops it with exit `3` before anything is written. `--allow-no-herdr`
+is the only way past it, and it is for a machine that is being prepared.
+
 Run the preflight below only after that.
 
 Run all of it, then report every failure together. Do not start installing until
@@ -191,7 +195,7 @@ Handoff message template (Thai):
 | Symptom | Cause | Action |
 |---|---|---|
 | `PyYAML is missing` | interpreter without PyYAML | `python3 -m pip install --user pyyaml`, re-run |
-| `herdr-app not found` | Herdr absent or never opened | stop, give the Human <https://herdr.dev/download/> and the installer line from Step 0 |
+| `herdr-app not found`, or the installer's preflight exits 3 | Herdr absent or not opened | stop, give the Human <https://herdr.dev/download/> and the installer line from Step 0; never pass `--allow-no-herdr` to get past this |
 | `Herdr app window is not reachable` | app closed | open Herdr.app, re-run `hteam check` |
 | `pi CLI not found` | no Pi runtime | stop, ask the Human |
 | `the agent-skills tooling is missing` | skill layer not installed | run `npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-code`, then the installer |
