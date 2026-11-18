@@ -137,3 +137,19 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 32px 0; }
   .site-main { padding: 28px 18px 48px; }
   table { display: block; overflow-x: auto; }
 }
+
+/* Rouge token colours: GitHub Pages highlights fenced code with classes. */
+.highlight .c, .highlight .c1, .highlight .cm { color: #7a8496; font-style: italic; }
+.highlight .nt, .highlight .nb, .highlight .nv { color: var(--accent); }
+.highlight .s, .highlight .s1, .highlight .s2, .highlight .se { color: #2f9e6f; }
+.highlight .k, .highlight .kd, .highlight .kn { color: #a25bd0; }
+.highlight .mi, .highlight .mf { color: #c2703b; }
+.highlight .o, .highlight .ow { color: var(--muted); }
+.highlight .gh, .highlight .gu { color: var(--accent); font-weight: 600; }
+.highlight .err { color: inherit; border: 0; }
+
+@media (prefers-color-scheme: dark) {
+  .highlight .s, .highlight .s1, .highlight .s2, .highlight .se { color: #6fd39b; }
+  .highlight .k, .highlight .kd, .highlight .kn { color: #c99bec; }
+  .highlight .mi, .highlight .mf { color: #e0a06a; }
+}
