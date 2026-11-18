@@ -121,7 +121,15 @@ Ask these four questions, one at a time. Use the answers verbatim.
 4. Which runtime is primary, `pi` or `claude`? (suggest `pi` — the fixed roles use
    Pi)
 
-Apply them:
+Run the wizard non-interactively with those answers (add `--dry-run` first if you
+want to see the writes):
+
+```bash
+hteam setup --defaults --folder "<folder>" --vault "<vault>" --voice "<on|off>" --projects none
+```
+
+It refuses a host that cannot start the team (exit `3`), and it never overwrites a
+registered project. Apply them by hand only if the wizard is unavailable:
 
 ```bash
 hteam-config set folder "<folder>" vault "<vault>" activity_log "<vault>/log.md" voice "<on|off>" repo "$HOME/.agents/skills/herdr-agent-team/harness"

@@ -28,6 +28,10 @@ hteam check --deep
 hteam
 ```
 
+`hteam setup` walks through folder, vault, project registry, and voice;
+`hteam health` re-checks the machine at any time and exits `3` when it cannot run
+the team.
+
 The skills CLI copies files and cannot run install scripts, so this wrapper runs
 both phases. The two commands, if you prefer them separate:
 

@@ -268,7 +268,7 @@ if [ -f "$BIN_MANIFEST" ]; then
   done < "$BIN_MANIFEST"
 fi
 : > "$BIN_MANIFEST"
-for binary in herdr-team agent-runtime spawn-agent verify-pane-agent agent-team-shutdown validate-okf voice-notify task-board workflow-shape herdr-app-team herdr-app-spawn-role hteam-dispatch hteam-config hteam-health tts-speak-omni clickup-status; do
+for binary in herdr-team agent-runtime spawn-agent verify-pane-agent agent-team-shutdown validate-okf voice-notify task-board workflow-shape herdr-app-team herdr-app-spawn-role hteam-dispatch hteam-config hteam-health hteam-setup tts-speak-omni clickup-status; do
   copy_file "$ROOT/bin/$binary" "$HOME/bin/$binary"
   chmod +x "$HOME/bin/$binary"
   echo "$binary" >> "$BIN_MANIFEST"

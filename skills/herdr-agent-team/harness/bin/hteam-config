@@ -118,11 +118,29 @@ def validate(values: dict) -> dict:
     return {key: normalise(key, values[key]) for key in ORDER if key in values}
 
 
+def yaml_scalar(value: str) -> str:
+    """Quote a value that another YAML reader would reinterpret.
+
+    `voice: on` is a string to this file's own parser but a boolean to PyYAML and
+    YAML 1.1 tools, so the stored form must be unambiguous: `voice: "on"`.
+    """
+    lowered = value.lower()
+    if lowered in ("on", "off", "yes", "no", "true", "false", "null", "~"):
+        return f'"{value}"'
+    if value != value.strip() or ":" in value or "#" in value:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    try:
+        float(value)
+    except ValueError:
+        return value
+    return f'"{value}"'
+
+
 def write_store(values: dict) -> Path:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     body = [HEADER.rstrip(), ""]
-    body += [f"{key}: {values[key]}" for key in ORDER if key in values]
+    body += [f"{key}: {yaml_scalar(str(values[key]))}" for key in ORDER if key in values]
     payload = "\n".join(body) + "\n"
     handle = tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False, prefix=".hteam.", suffix=".tmp")
     try:

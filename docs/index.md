@@ -151,8 +151,23 @@ registry, the vault, or `~/.config/herdr-team/setup-answers.md`.
 
 ## Configure
 
-`/hteam setup` in a Pi session asks the questions and writes the file; the same
-values are available from the CLI:
+`hteam setup` is the guided path. It checks the host first (`health --json`), asks
+only what it cannot detect, and writes through `hteam-config`, so nothing is
+hand-edited:
+
+```bash
+hteam setup                 # interactive
+hteam setup --dry-run       # print the writes
+hteam setup --defaults      # recommended answers, no prompts
+hteam setup --only vault    # one step
+hteam setup --projects all  # register every git repository under the folder
+```
+
+It refuses to run on a host that cannot start the team (exit `3`), never
+overwrites a registered project, and keeps a backup of the registry before
+writing it.
+
+The same values by hand:
 
 ```bash
 hteam-config show          # effective values and where each came from
@@ -390,6 +405,7 @@ Repeat `roster ROLE TIER` for each role and tier you touched. A route that print
 | `hteam` | start or report the Orchestrator in the app |
 | `hteam check`, `hteam check --deep` | prerequisites, then installed-artifact integrity |
 | `hteam health`, `hteam health --json` | readiness: host, Herdr, runtimes, install, routing, vault, voice — exit `3` when the host cannot run the team |
+| `hteam setup` | guided: Herdr check → folder → vault → projects → voice; `--defaults`, `--dry-run`, `--only`, `--projects all\|none` |
 | `hteam-config show`, `set`, `validate` | read and write per-machine config |
 | `hteam-dispatch <role> --brief F --request "…" --risk low` | one call: intake → shape → spawn, and it refuses a role the shape does not staff |
 | `hteam-dispatch --explain --request "…" --risk low` | print the resolved shape without spawning |
@@ -474,6 +490,7 @@ Known gaps, in priority order:
    artifacts are still open.
 2. **`hteam model`** — a wizard for routing, writing a layered
    `team.local.json` so `npx skills update` cannot silently revert a model choice.
+   `hteam setup` deliberately stops before models for that reason.
 3. **`hteam agent`** — a constrained "clone a role contract" wizard; a brand-new
    role still belongs in the repository, with tests.
 4. **npm package** — `npx herdr-agent-team`, version-pinned, instead of fetching

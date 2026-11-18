@@ -24,6 +24,7 @@ Install, then verify:
 - `hteam`: start or report the Orchestrator in the Herdr app.
 - `hteam check [--deep]`: prerequisites, then installed-artifact integrity.
 - `hteam health [--json]`: one readiness verdict for host, Herdr, runtimes, install, routing, vault, and voice; exit 3 when the host cannot run the team.
+- `hteam setup [--defaults|--dry-run|--only ...]`: guided setup — host check, folder, vault, project registry, voice.
 - `hteam-config show|get|set|validate|path`: per-machine config at `~/.config/herdr-team/hteam.yaml`.
 - `hteam-dispatch <role> --brief F --request "…" --risk low`: intake, resolve, spawn in one call.
 - `workflow-shape --list`: the eleven task shapes (`W0`–`W10`).

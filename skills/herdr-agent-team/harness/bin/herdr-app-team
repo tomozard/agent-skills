@@ -65,18 +65,20 @@ VOICE="${HERDR_VOICE_MODE:-off}"
 die()  { echo "herdr-app-team: $*" >&2; exit 1; }
 ok()   { echo "  ok:   $*"; }
 
-# `hteam health` is the machine-readiness check, not a launcher mode: hand the
-# arguments straight to the installed checker so there is one implementation.
-if [ "${1:-}" = "health" ]; then
-  shift
-  HEALTH_BIN="$(dirname "$SELF")/hteam-health"
-  if [ ! -x "$HEALTH_BIN" ]; then
-    HEALTH_BIN="$(command -v hteam-health 2>/dev/null || true)"
+# `hteam health` and `hteam setup` are tools, not launcher modes: hand the
+# arguments straight to the installed implementation so there is one copy.
+for HANDOFF in health setup; do
+  if [ "${1:-}" = "$HANDOFF" ]; then
+    shift
+    HANDOFF_BIN="$(dirname "$SELF")/hteam-$HANDOFF"
+    if [ ! -x "$HANDOFF_BIN" ]; then
+      HANDOFF_BIN="$(command -v "hteam-$HANDOFF" 2>/dev/null || true)"
+    fi
+    [ -n "$HANDOFF_BIN" ] && [ -x "$HANDOFF_BIN" ] \
+      || die "$HANDOFF helper not found (run setup_harness.sh)"
+    exec "$HANDOFF_BIN" "$@"
   fi
-  [ -n "$HEALTH_BIN" ] && [ -x "$HEALTH_BIN" ] \
-    || die "health checker not found (run setup_harness.sh)"
-  exec "$HEALTH_BIN" "$@"
-fi
+done
 
 # `check --deep` audits what setup_harness.sh installed: every manifest entry must
 # exist, and every installed binary must still match the payload it came from.

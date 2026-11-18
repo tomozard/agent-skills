@@ -92,9 +92,15 @@ case "$COMMAND" in
   health) health_dispatch "$@" ;;
   version) version_dispatch; exit 0 ;;
   setup)
-    echo "herdr-install: setup is not implemented yet." >&2
-    echo "  install the harness, then configure it with hteam-config or /hteam setup" >&2
-    exit 2
+    SETUP_BIN="$PACKAGE_ROOT/skills/herdr-agent-team/harness/bin/hteam-setup"
+    if [ ! -x "$SETUP_BIN" ]; then
+      SETUP_BIN="$(command -v hteam-setup 2>/dev/null || true)"
+    fi
+    if [ -z "$SETUP_BIN" ] || [ ! -x "$SETUP_BIN" ]; then
+      echo "herdr-install: setup wizard not found in the package" >&2
+      exit 2
+    fi
+    exec "$SETUP_BIN" "$@"
     ;;
 esac
 

@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""Guided setup for the Herdr agent team.
+
+A wizard, not an installer: it asks the questions only the Human can answer
+(folder, vault, projects, voice) and writes them with the tools that already own
+those files. It never installs anything, never writes a model, and never
+overwrites a project already in the registry.
+
+  hteam setup                        interactive
+  hteam setup --defaults             recommended answers, no prompts
+  hteam setup --dry-run              print what would be written
+  hteam setup --only folder,vault    one or more steps
+  hteam setup --projects all|none|a,b
+
+Flags (skipped prompts): --folder PATH --vault PATH --registry PATH
+                         --voice on|off --space NAME
+
+Exit codes: 0 done, 1 aborted by the Human, 2 bad usage, 3 host cannot run the team.
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+try:
+    import yaml  # type: ignore
+except ImportError:  # pragma: no cover - reported with a fix, not a traceback
+    yaml = None
+
+HERE = Path(__file__).resolve().parent
+STEPS = ("folder", "vault", "projects", "voice")
+TITLE = "Herdr agent team · setup"
+
+
+def tool(name: str) -> Optional[Path]:
+    sibling = HERE / name
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return sibling
+    found = shutil.which(name)
+    return Path(found) if found else None
+
+
+CONFIG = tool("hteam-config")
+HEALTH = tool("hteam-health")
+
+
+def run(argv: List[Any], timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run([str(item) for item in argv], capture_output=True, text=True, timeout=timeout)
+
+
+def health_report() -> Optional[Dict[str, Any]]:
+    if not HEALTH:
+        return None
+    try:
+        result = run([HEALTH, "--json"], timeout=90)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode not in (0, 1, 3):
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def config_values() -> Dict[str, str]:
+    if not CONFIG:
+        return {}
+    try:
+        result = run([CONFIG, "show", "--json"], timeout=15)
+        data = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return {}
+    values = data.get("values") if isinstance(data, dict) else None
+    return {key: str(value) for key, value in (values or data).items()} if isinstance(data, dict) else {}
+
+
+def set_config(pairs: Dict[str, str], dry: bool) -> List[str]:
+    if not pairs:
+        return []
+    argv = [CONFIG, "set"]
+    for key, value in pairs.items():
+        argv.extend([key, value])
+    if dry:
+        return [" ".join(str(item) for item in argv)]
+    result = run(argv, timeout=20)
+    if result.returncode != 0:
+        print(result.stderr.strip() or "hteam-config set failed", file=sys.stderr)
+        raise SystemExit(2)
+    return []
+
+
+def ask(text: str, default: str) -> str:
+    suffix = f" [{default}]" if default else ""
+    answer = input(f"{text}{suffix}: ").strip()
+    return answer or default
+
+
+def choose(text: str, options: List[str], default: int = 1) -> int:
+    for index, option in enumerate(options, start=1):
+        marker = " (default)" if index == default else ""
+        print(f"  {index}. {option}{marker}")
+    while True:
+        raw = input(f"{text} [1-{len(options)}]: ").strip()
+        if not raw:
+            return default
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return int(raw)
+        print("  please enter one of the numbers above")
+
+
+def slugify(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return slug or "project"
+
+
+def scan_projects(folder: Path) -> List[Path]:
+    found: List[Path] = []
+    if not folder.is_dir():
+        return found
+    for depth in (1, 2, 3):
+        pattern = "/".join(["*"] * depth)
+        for git_dir in folder.glob(f"{pattern}/.git"):
+            if git_dir.is_dir():
+                project = git_dir.parent
+                if project != folder and project not in found:
+                    found.append(project)
+    return sorted(found)
+
+
+def configured_registry() -> Optional[str]:
+    """The registry only wins when the config file names it, not a default."""
+    for candidate in (Path(os.environ.get("HERDR_TEAM_CONFIG", "")).expanduser()
+                      if os.environ.get("HERDR_TEAM_CONFIG") else None,
+                      Path.home() / ".config" / "herdr-team" / "hteam.yaml"):
+        if candidate and candidate.is_file():
+            try:
+                data = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
+            except Exception:  # noqa: BLE001 - a broken file is reported by hteam-config
+                continue
+            if isinstance(data, dict) and data.get("registry"):
+                return str(data["registry"])
+    return None
+
+
+def registry_path(args: argparse.Namespace, folder: Path) -> Path:
+    # --registry wins; then a registry the config file actually names; then the
+    # conventional path under the chosen folder. hteam-config's *default* must
+    # never redirect the registry away from the folder the Human just picked.
+    if args.registry:
+        return Path(args.registry).expanduser()
+    explicit = configured_registry()
+    if explicit:
+        return Path(explicit).expanduser()
+    return folder / ".agents" / "workspace-registry.yaml"
+
+
+def load_registry(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        return {"projects": {}}
+    if yaml is None:
+        print("hteam-setup: PyYAML is missing; cannot read the registry", file=sys.stderr)
+        print("  python3 -m pip install --user pyyaml", file=sys.stderr)
+        raise SystemExit(2)
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        data = {}
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        data["projects"] = {}
+    return data
+
+
+def write_registry(path: Path, data: Dict[str, Any], dry: bool) -> List[str]:
+    text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    if dry:
+        return [f"write {path} ({len(data.get('projects') or {})} projects)"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file():
+        backup = path.with_name(path.name + ".bak")
+        backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
+    return []
+
+
+def step_folder(values: Dict[str, str], args: argparse.Namespace) -> Dict[str, str]:
+    suggested = args.folder or values.get("folder") or str(Path.home() / "Workspaces")
+    if args.defaults or args.folder:
+        folder = suggested
+    else:
+        print("\nWhere do the projects live? Every team terminal starts here.")
+        folder = ask("Projects folder", suggested)
+    path = Path(folder).expanduser()
+    if not path.is_dir():
+        if args.defaults:
+            print(f"  note: {path} does not exist yet")
+        else:
+            print(f"  {path} does not exist. Create it? [y/N] ", end="")
+            if input().strip().lower() in ("y", "yes"):
+                path.mkdir(parents=True, exist_ok=True)
+                print(f"  created {path}")
+            else:
+                print(f"  keeping {path} anyway; the launcher will report it")
+    return {"folder": str(path)}
+
+
+def step_vault(values: Dict[str, str], folder: str, args: argparse.Namespace) -> Dict[str, str]:
+    suggested = args.vault or values.get("vault") or str(Path(folder) / "vault")
+    if args.defaults or args.vault:
+        vault = suggested
+    else:
+        print("\nLong-term notes and the completion journal. Documenter writes here,")
+        print("Investigator reads only an approved scope inside it.")
+        vault = ask("Vault", suggested)
+    path = Path(vault).expanduser()
+    log = path / "log.md"
+    if not path.is_dir():
+        if args.dry_run:
+            print(f"  would create {path}")
+        elif args.defaults or input(f"  Create {path}? [Y/n] ").strip().lower() not in ("n", "no"):
+            path.mkdir(parents=True, exist_ok=True)
+            print(f"  created {path}")
+    if path.is_dir() and not log.is_file() and not args.dry_run:
+        if args.defaults or input(f"  Create {log}? [Y/n] ").strip().lower() not in ("n", "no"):
+            log.write_text("# Activity log\n", encoding="utf-8")
+            print(f"  created {log}")
+    return {"vault": str(path), "activity_log": str(log)}
+
+
+def step_projects(values: Dict[str, str], folder: str, args: argparse.Namespace) -> List[Path]:
+    path = registry_path(args, Path(folder))
+    data = load_registry(path)
+    existing = data.get("projects") or {}
+    candidates = scan_projects(Path(folder))
+    if not candidates:
+        print("\nNo git repositories found to register.")
+        return []
+    print(f"\nFound {len(candidates)} repositories under {folder}. Registered: {len(existing)}.")
+
+    selected: List[Path] = []
+    if args.projects is not None:
+        spec = args.projects.strip().lower()
+        if spec == "all":
+            selected = candidates
+        elif spec == "none":
+            selected = []
+        else:
+            wanted = {slugify(item) for item in spec.split(",") if item.strip()}
+            selected = [c for c in candidates if slugify(c.name) in wanted]
+    elif args.defaults or not sys.stdin.isatty():
+        print("  --defaults registers nothing; pass --projects all or a list of slugs.")
+        selected = []
+    else:
+        for index, project in enumerate(candidates, start=1):
+            mark = "*" if slugify(project.name) in existing else " "
+            print(f"  {index:>2}.{mark} {project.name}  ({project})")
+        print("  (* = already registered)")
+        raw = ask("Register which? all, none, or numbers like 1,3", "none").strip().lower()
+        if raw == "all":
+            selected = candidates
+        elif raw not in ("none", "", "n"):
+            picks = {int(part) for part in re.findall(r"\d+", raw) if 1 <= int(part) <= len(candidates)}
+            selected = [candidates[index - 1] for index in sorted(picks)]
+
+    added, kept = [], []
+    for project in selected:
+        slug = slugify(project.name)
+        if slug in existing:
+            kept.append(slug)
+            continue
+        if any(slugify(other.name) == slug for other in selected if other != project):
+            slug = slugify(f"{project.parent.name} {project.name}")
+        data.setdefault("projects", {})[slug] = {
+            "name": project.name,
+            "path": str(project),
+            "description": "",
+            "status": "active",
+        }
+        added.append(slug)
+
+    if args.dry_run:
+        for line in write_registry(path, data, dry=True):
+            print(f"  would {line}")
+    elif added:
+        write_registry(path, data, dry=False)
+        print(f"  registry: +{len(added)} ({', '.join(added)}) -> {path}")
+    elif kept:
+        print(f"  registry unchanged (already registered: {', '.join(kept)})")
+    return selected
+
+
+def step_voice(values: Dict[str, str], args: argparse.Namespace) -> Dict[str, str]:
+    current = values.get("voice") or "off"
+    if args.voice:
+        return {"voice": args.voice}
+    if args.defaults or not sys.stdin.isatty():
+        return {"voice": current}
+    engines = []
+    if shutil.which("gtts-cli"):
+        engines.append("gTTS")
+    if (Path.home() / "bin" / "tts-speak-omni").is_file():
+        engines.append("VoiceStudio")
+    print("\nVoice: short Thai status from the Orchestrator and PM only.")
+    if not engines:
+        print("  no engine found (gTTS or VoiceStudio); staying off")
+        return {"voice": "off"}
+    print(f"  engine available: {', '.join(engines)}")
+    index = choose("Voice mode", ["off", "on"], 1)
+    return {"voice": "on" if index == 2 else "off"}
+
+
+RESULT: Dict[str, Any] = {}
+
+
+def execute(args: argparse.Namespace) -> int:
+    print(TITLE)
+    if args.dry_run:
+        print("(dry run: nothing will be written)")
+
+    report = health_report()
+    if report is None:
+        print("  note: health check unavailable; continuing without it")
+    else:
+        summary = report.get("summary") or {}
+        host_fail = [check for check in report.get("checks") or []
+                     if check.get("section") in ("host", "herdr", "runtimes")
+                     and check.get("status") == "fail"]
+        print(f"  health: {'host ready' if not host_fail else 'host NOT ready'} "
+              f"(overall {report.get('status')}, {summary.get('fail', 0)} fail before setup)")
+        for check in report.get("checks") or []:
+            if check.get("section") not in ("host", "herdr", "runtimes"):
+                continue
+            if check.get("status") in ("fail", "warn") and check.get("hint"):
+                print(f"    {check['status']}: {check['id']} — {check['hint']}")
+        if not report.get("host_ready", True):
+            print("\nThis host cannot run the team yet (see the fail lines above).", file=sys.stderr)
+            RESULT.update({"schema": 1, "status": "host-not-ready",
+                           "health": report.get("status")})
+            return 3
+
+    values = config_values()
+    plan: Dict[str, str] = {}
+    steps = [step.strip() for step in args.only.split(",") if step.strip()] or list(STEPS)
+
+    if args.space:
+        plan["space"] = args.space
+    if args.registry:
+        plan["registry"] = str(Path(args.registry).expanduser())
+
+    if "folder" in steps:
+        plan.update(step_folder(values, args))
+    folder = plan.get("folder") or values.get("folder") or str(Path.home() / "Workspaces")
+
+    if "vault" in steps:
+        plan.update(step_vault(values, folder, args))
+
+    if "projects" in steps:
+        step_projects({**values, **plan}, folder, args)
+
+    if "voice" in steps:
+        plan.update(step_voice(values, args))
+
+    if plan:
+        writes = set_config(plan, args.dry_run)
+        if args.dry_run:
+            for line in writes:
+                print(f"  would run: {line}")
+        else:
+            print(f"  config: {', '.join(f'{key}={value}' for key, value in plan.items())}")
+
+    if not args.dry_run:
+        answers = Path.home() / ".config" / "herdr-team" / "setup-answers.md"
+        answers.parent.mkdir(parents=True, exist_ok=True)
+        answers.write_text(
+            "# Setup answers\n\n"
+            + "\n".join(f"- {key}: {value}" for key, value in sorted({**values, **plan}.items()))
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"  answers: {answers}")
+
+    final = {**values, **plan}
+    RESULT.update({
+        "schema": 1,
+        "status": "ok",
+        "dry_run": args.dry_run,
+        "steps": steps,
+        "config": plan,
+        "effective": final,
+        "health": (report or {}).get("status"),
+    })
+
+    print("\nnext")
+    print("  hteam              start the team (Herdr app)")
+    print("  hteam check        verify the install")
+    print("  hteam health       re-check the host any time")
+    if not final.get("registry"):
+        print("  note: the registry follows the folder until a project is registered")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="hteam-setup", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--defaults", action="store_true", help="accept the recommended answers")
+    parser.add_argument("--dry-run", action="store_true", help="print the writes, change nothing")
+    parser.add_argument("--json", action="store_true", help="machine-readable summary only")
+    parser.add_argument("--only", default="", help=f"comma list of steps: {','.join(STEPS)}")
+    parser.add_argument("--projects", default=None, help="all, none, or slug,slug")
+    parser.add_argument("--folder")
+    parser.add_argument("--vault")
+    parser.add_argument("--registry")
+    parser.add_argument("--voice", choices=("on", "off"))
+    parser.add_argument("--space")
+    args = parser.parse_args()
+
+    steps = [step.strip() for step in args.only.split(",") if step.strip()] or list(STEPS)
+    unknown = [step for step in steps if step not in STEPS]
+    if unknown:
+        print(f"hteam-setup: unknown step(s): {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    if not args.defaults and not sys.stdin.isatty():
+        print("hteam-setup: this is an interactive wizard; use --defaults for scripts", file=sys.stderr)
+        return 2
+    if yaml is None:
+        print("hteam-setup: PyYAML is required (python3 -m pip install --user pyyaml)", file=sys.stderr)
+        return 2
+
+    if args.json:
+        buffer = io.StringIO()
+        original = sys.stdout
+        sys.stdout = buffer
+        try:
+            code = execute(args)
+        finally:
+            sys.stdout = original
+        print(json.dumps(RESULT, indent=2))
+        return code
+    return execute(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
