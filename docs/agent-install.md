@@ -45,7 +45,7 @@ is the only way past it, and it is for a machine that is being prepared.
 This is authoritative, writes nothing, and starts no model:
 
 ```bash
-npx -y github:tomozard/agent-skills health --json
+npx herdr-agent-team health --json
 ```
 
 Read `status`, `host_ready`, and every `checks[]` entry whose `status` is `fail`
@@ -82,7 +82,7 @@ case ":$PATH:" in *":$HOME/bin:"*) echo "PATH ok";; *) echo "PATH missing ~/bin"
 ## Step 1 — Install
 
 ```bash
-npx -y github:tomozard/agent-skills --yes
+npx -y herdr-agent-team@latest --yes
 ```
 
 `--yes` is required; without it the wrapper prints the plan and exits 1. The

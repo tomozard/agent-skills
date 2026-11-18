@@ -79,7 +79,7 @@ and stop.
 Check the whole host with one read-only command (it installs nothing):
 
 ```bash
-npx -y github:tomozard/agent-skills health
+npx herdr-agent-team health
 ```
 
 Then open Herdr once. `~/.local/bin/herdr-app` and `~/.local/bin/herdr-core` must
@@ -101,8 +101,11 @@ machine that is being prepared.
 check:
 
 ```bash
-npx -y github:tomozard/agent-skills --yes
+npx -y herdr-agent-team@latest --yes
 ```
+
+Pinned: `npx -y herdr-agent-team@0.2.0 --yes`. Straight from the repository:
+`npx -y github:tomozard/agent-skills --yes`.
 
 What that does, in order:
 
@@ -536,9 +539,7 @@ Known gaps, in priority order:
    prompt editing (not just routing) and an `--explain` diff are still open.
 3. **`hteam agent` follow-ups** — cloning exists; editing the role text in place
    from the wizard, and generating the operator reference page, are still open.
-4. **npm package** — `npx herdr-agent-team`, version-pinned, instead of fetching
-   the repository on every install.
-5. **Project scope checks** — per-project health (registry entry, branch, task
+4. **Project scope checks** — per-project health (registry entry, branch, task
    board, vault log) and a `hteam project` helper for the registry.
 
 Contributions to any of these are welcome — the repository's test suite

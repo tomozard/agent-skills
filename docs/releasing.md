@@ -58,6 +58,12 @@ Keep them equal. `npx herdr-agent-team@0.2.0`, tag `v0.2.0`, and `package.json`
    A brand-new package name first gains a `0.0.0-stage` placeholder. It is
    npm's, it is harmless, and it stops being `latest` once a real version lands.
 
+   The registry can take a minute or three before the new version is visible.
+   While it processes, publishing again fails with `You cannot publish over the
+   previously published versions: <version>` — that is the registry telling you
+   the version already landed, not that the release failed. Check with
+   `npm view herdr-agent-team version` before reacting.
+
 5. **Verify before announcing:**
 
    ```bash

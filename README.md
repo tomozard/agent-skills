@@ -1,5 +1,7 @@
 # AI Agent Skills
 
+[![npm](https://img.shields.io/npm/v/herdr-agent-team.svg)](https://www.npmjs.com/package/herdr-agent-team)
+
 Agent skills and workflows for coding agents, installable through
 [skills.sh](https://skills.sh).
 
@@ -22,8 +24,8 @@ Python 3 with PyYAML.
 ### Install
 
 ```bash
-npx -y github:tomozard/agent-skills health   # read-only: is this machine ready?
-npx -y github:tomozard/agent-skills --yes    # skill layer + runtime layer + deep check
+npx herdr-agent-team health                # read-only: is this machine ready?
+npx -y herdr-agent-team@latest --yes       # skill layer + runtime layer + deep check
 hteam check --deep
 hteam
 ```
@@ -33,6 +35,9 @@ hteam
 `hteam agent` clones a role contract when a machine needs a variant;
 `hteam health` re-checks the machine at any time and exits `3` when it cannot run
 the team.
+
+Pinned to a version: `npx -y herdr-agent-team@0.2.0 --yes`. Installing straight
+from the repository works too: `npx -y github:tomozard/agent-skills --yes`.
 
 The skills CLI copies files and cannot run install scripts, so this wrapper runs
 both phases. The two commands, if you prefer them separate:

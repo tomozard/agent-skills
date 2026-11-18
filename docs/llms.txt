@@ -8,7 +8,7 @@
 
 Install, then verify:
 
-    npx -y github:tomozard/agent-skills --yes
+    npx -y herdr-agent-team@latest --yes
     hteam check --deep
     hteam
 
