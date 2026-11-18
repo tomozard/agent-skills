@@ -166,6 +166,10 @@ fi
 
 TEAM_FILE="$AGENTS_HOME/team.json"
 ROLE_FILE="$AGENTS_HOME/agents/$ROLE.md"
+# A machine-local role (hteam agent) lives outside the installed payload.
+if [ ! -r "$ROLE_FILE" ] && [ -r "$HOME/.config/herdr-team/roles/$ROLE.md" ]; then
+  ROLE_FILE="$HOME/.config/herdr-team/roles/$ROLE.md"
+fi
 COMMON_FILE="$AGENTS_HOME/agents.md"
 
 if ! python3 - "$TEAM_FILE" "$ROLE" <<'PY'

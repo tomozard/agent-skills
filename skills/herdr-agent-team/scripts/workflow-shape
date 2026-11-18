@@ -517,6 +517,11 @@ def build_staff(team, shape_id, intake, tier):
     parallel = streams > 1 and shape_id in {"W2-micro", "W3-fix", "W4-fix-test",
                                             "W5-refactor", "W6-fix-refactor",
                                             "W7-feature", "W9-ops"}
+    for name, entry in sorted((team.get("local_roles") or {}).items()):
+        if entry.get("kind") in ("worker", "planner") and shape_id in (entry.get("shapes") or []):
+            if name not in roles:
+                roles.append(name)
+
     for role in roles:
         copies = streams if parallel and role in {"coder", "refactor"} else 1
         for index in range(copies):
@@ -532,6 +537,10 @@ def explain_shape(shape_id, team, intake):
     tier, tier_reason = tier_for(intake, shape_id)
     staff, parallel = build_staff(team, shape_id, intake, tier)
     verifiers = list(shape["verifiers"])
+    for name, entry in sorted((team.get("local_roles") or {}).items()):
+        if entry.get("kind") == "verifier" and shape_id in (entry.get("shapes") or []):
+            if name not in verifiers:
+                verifiers.append(name)
     risk = intake.get("risk", "low")
     if shape_id == "W1-doc" and (intake.get("policy_sensitive_doc") or risk != "low"):
         verifiers = ["reviewer"]

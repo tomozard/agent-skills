@@ -64,9 +64,21 @@ def actor() -> str:
     )
     if not value:
         fail("TASK_AGENT_ROLE (or HERDR_AGENT_ROLE) is required")
-    if value not in ROLES:
+    if value not in ROLES and value not in local_roles():
         fail(f"invalid agent role: {value}")
     return value
+
+
+def local_roles() -> set:
+    """Roles a machine-local overlay added; unknown names stay refused."""
+    team = Path.home() / ".agents" / "team.json"
+    if not team.is_file():
+        return set()
+    try:
+        data = json.loads(team.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return set((data.get("roles") or {}).keys())
 
 
 def require_mutation() -> str:

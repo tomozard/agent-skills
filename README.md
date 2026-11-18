@@ -30,6 +30,7 @@ hteam
 
 `hteam setup` walks through folder, vault, project registry, and voice;
 `hteam model` pins routing in a machine overlay that survives updates;
+`hteam agent` clones a role contract when a machine needs a variant;
 `hteam health` re-checks the machine at any time and exits `3` when it cannot run
 the team.
 

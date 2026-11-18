@@ -67,7 +67,7 @@ ok()   { echo "  ok:   $*"; }
 
 # `hteam health` and `hteam setup` are tools, not launcher modes: hand the
 # arguments straight to the installed implementation so there is one copy.
-for HANDOFF in health setup model; do
+for HANDOFF in health setup model agent; do
   if [ "${1:-}" = "$HANDOFF" ]; then
     shift
     HANDOFF_BIN="$(dirname "$SELF")/hteam-$HANDOFF"

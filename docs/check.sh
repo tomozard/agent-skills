@@ -33,6 +33,7 @@ COMMANDS = {
     "hteam-health": skill / "harness/bin/hteam-health",
     "hteam-setup": skill / "harness/bin/hteam-setup",
     "hteam-model": skill / "harness/bin/hteam-model",
+    "hteam-agent": skill / "harness/bin/hteam-agent",
     "team-config": skill / "scripts/team-config",
     "agent-runtime": skill / "harness/bin/agent-runtime",
     "spawn-agent": skill / "harness/bin/spawn-agent",

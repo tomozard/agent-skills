@@ -12,6 +12,11 @@
 set -euo pipefail
 
 SCRIPTS="${HERDR_AGENT_TEAM_SCRIPTS:-$HOME/.agents/skills/herdr-agent-team/scripts}"
+# A payload checkout has the implementation next to the shim; use it when the
+# skill is not installed into ~/.agents yet.
+if [ ! -x "$SCRIPTS/task-board" ] && [ -x "$(dirname "$0")/../../scripts/task-board" ]; then
+  SCRIPTS="$(cd "$(dirname "$0")/../../scripts" && pwd)"
+fi
 
 if [ ! -x "$SCRIPTS/task-board" ]; then
   echo "task-board: the agent-skills task board is not installed" >&2

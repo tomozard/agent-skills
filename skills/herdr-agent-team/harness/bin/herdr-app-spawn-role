@@ -139,7 +139,21 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-case " $ROLES " in *" $ROLE "*) ;; *) die "unknown role: $ROLE (one of: $ROLES)" ;; esac
+role_known() {
+  case " $ROLES " in *" $1 "*) return 0 ;; esac
+  [ -r "$HOME/.agents/team.json" ] || return 1
+  python3 - "$HOME/.agents/team.json" "$1" <<'PY'
+import json
+import sys
+
+try:
+    roles = json.load(open(sys.argv[1], encoding="utf-8")).get("roles") or {}
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if sys.argv[2] in roles else 1)
+PY
+}
+role_known "$ROLE" || die "unknown role: $ROLE (one of: $ROLES, or a local role in team.json)"
 
 # One space per project. A project role launched without --project used to fall
 # back to the control space, which is how a pm-{project} tab ended up mixed into
@@ -162,7 +176,11 @@ case "$PLACE" in
 esac
 [ -r "$BRIEF_SRC" ] || die "brief not readable: $BRIEF_SRC"
 [ -x "$REPO/bin/agent-runtime" ] || die "missing $REPO/bin/agent-runtime (set HERDR_TEAM_REPO)"
-[ -r "$REPO/.agents/agents/$ROLE.md" ] || die "missing role file: $REPO/.agents/agents/$ROLE.md"
+if [ ! -r "$REPO/.agents/agents/$ROLE.md" ] \
+   && [ ! -r "$HOME/.config/herdr-team/roles/$ROLE.md" ] \
+   && [ ! -r "$HOME/.agents/agents/$ROLE.md" ]; then
+  die "missing role file: $REPO/.agents/agents/$ROLE.md (or a local role under ~/.config/herdr-team/roles/)"
+fi
 [ -x "$APP" ] || die "herdr-app not found"
 [ -d "$CWD" ] || die "cwd not found: $CWD"
 

@@ -330,6 +330,27 @@ The shape decides who works, from one intake file:
 execution paths. PM chooses both and records why. Raising the shape once needs a
 written reason; a second raise is the Human's decision.
 
+### Local roles
+
+A brand-new role belongs in this repository, with tests and a reviewed shape
+membership. When a machine only needs a variant of a contract it already has,
+`hteam agent` clones one into a local role:
+
+```bash
+hteam agent --add security_reviewer --from reviewer --shapes W3-fix,W7-feature
+hteam agent --list
+hteam agent --remove security_reviewer
+```
+
+A clone cannot invent authority: it copies the base contract, is pinned to one
+model, and may only be staffed by shapes you name. A cloned planner never gains
+write access, a controller is not cloneable, and removing it deletes the role
+text, the Claude agent file, and every overlay entry.
+
+The role text lives in `~/.config/herdr-team/roles/<name>.md`; the resolver reads
+its shape membership from `local_roles` in `team.local.json`, so an undeclared
+shape cannot staff it.
+
 ## Routing and models
 
 `team.json` (schema v4) is the only source of model identifiers. A role is either
@@ -427,6 +448,7 @@ team-config reset          # drop the overlay and re-render
 | `hteam health`, `hteam health --json` | readiness: host, Herdr, runtimes, install, routing, vault, voice — exit `3` when the host cannot run the team |
 | `hteam setup` | guided: Herdr check → folder → vault → projects → voice; `--defaults`, `--dry-run`, `--only`, `--projects all\|none` |
 | `hteam model` | show/pin routing in `team.local.json`, re-render, validate |
+| `hteam agent` | list/add/remove a machine-local role cloned from a built-in contract |
 | `hteam-config show`, `set`, `validate` | read and write per-machine config |
 | `hteam-dispatch <role> --brief F --request "…" --risk low` | one call: intake → shape → spawn, and it refuses a role the shape does not staff |
 | `hteam-dispatch --explain --request "…" --risk low` | print the resolved shape without spawning |
@@ -511,8 +533,8 @@ Known gaps, in priority order:
    artifacts are still open.
 2. **`hteam model` follow-ups** — the overlay and the wizard exist; per-role
    prompt editing (not just routing) and an `--explain` diff are still open.
-3. **`hteam agent`** — a constrained "clone a role contract" wizard; a brand-new
-   role still belongs in the repository, with tests.
+3. **`hteam agent` follow-ups** — cloning exists; editing the role text in place
+   from the wizard, and generating the operator reference page, are still open.
 4. **npm package** — `npx herdr-agent-team`, version-pinned, instead of fetching
    the repository on every install.
 5. **Project scope checks** — per-project health (registry entry, branch, task

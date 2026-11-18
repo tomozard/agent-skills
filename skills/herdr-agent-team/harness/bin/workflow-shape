@@ -14,6 +14,11 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/.." && pwd)"
 SCRIPTS="${HERDR_AGENT_TEAM_SCRIPTS:-$HOME/.agents/skills/herdr-agent-team/scripts}"
+# A payload checkout has the implementation next to the shim; use it when the
+# skill is not installed into ~/.agents yet.
+if [ ! -x "$SCRIPTS/workflow-shape" ] && [ -x "$(dirname "$0")/../../scripts/workflow-shape" ]; then
+  SCRIPTS="$(cd "$(dirname "$0")/../../scripts" && pwd)"
+fi
 
 if [ ! -x "$SCRIPTS/workflow-shape" ]; then
   echo "workflow-shape: the agent-skills resolver is not installed" >&2

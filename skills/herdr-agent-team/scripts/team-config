@@ -116,9 +116,17 @@ def effective() -> Dict[str, Any]:
     overlay = load_overlay()
     merged = merge(base, overlay) if overlay else base
     known = set((base.get("roles") or {}).keys())
+    # A local role is declared in local_roles and carries its own roster entry;
+    # anything else is a typo or an unauthorised role.
+    declared = set((merged.get("local_roles") or {}).keys())
     for role in (merged.get("roles") or {}):
-        if role not in known:
+        if role not in known and role not in declared:
             fail(f"overlay names unknown role '{role}' (canonical roles: {', '.join(sorted(known))})")
+    for role, entry in (merged.get("local_roles") or {}).items():
+        if not isinstance(entry, dict) or not entry.get("shapes"):
+            fail(f"local role '{role}' must declare at least one shape")
+        if role not in (merged.get("roles") or {}):
+            fail(f"local role '{role}' has no roster entry")
     return merged
 
 

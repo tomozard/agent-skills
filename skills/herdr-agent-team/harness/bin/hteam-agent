@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""Clone a role contract into a machine-local role.
+
+A brand-new role belongs in the repository, with tests and shape membership
+reviewed like any other policy. This tool is the bounded alternative: it clones
+an existing contract under a new name, keeps it out of the engine's built-ins,
+declares which shapes may staff it, and refuses anything that would create a
+policy hole.
+
+What it writes:
+  ~/.config/herdr-team/roles/<name>.md          the role text (copied, marked)
+  ~/.claude/agents/herdr-<name>.md              the Claude agent file
+  ~/.config/herdr-team/team.local.json          local_roles.<name> + roles.<name>
+  ~/.agents/team.json                           re-rendered, then validated
+
+  hteam agent                                   list, then add interactively
+  hteam agent --list                            local roles and their shapes
+  hteam agent --json                            machine-readable view
+  hteam agent --add NAME --from BASE --shapes W3-fix,W4-fix-test [--kind K]
+  hteam agent --remove NAME
+
+Exit codes: 0 ok, 1 refused/restored, 2 usage, 3 the resulting roster is stuck.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+HERE = Path(__file__).resolve().parent
+KINDS = {"worker", "planner", "verifier", "documenter"}
+KIND_OF_BASE = {
+    "coder": "worker",
+    "refactor": "worker",
+    "sa": "planner",
+    "investigator": "planner",
+    "researcher": "planner",
+    "designer": "planner",
+    "reviewer": "verifier",
+    "tester": "verifier",
+    "documenter": "documenter",
+}
+WRITE_BASES = {"coder", "refactor"}
+NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
+
+
+def fail(message: str, code: int = 2) -> "None":
+    print(f"hteam-agent: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def tool(name: str, *extra: Path) -> Optional[Path]:
+    for candidate in (HERE / name,
+                      HERE.parent / "scripts" / name,
+                      HERE.parent.parent / "scripts" / name,
+                      *extra):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    found = shutil.which(name)
+    return Path(found) if found else None
+
+
+TEAM_CONFIG = tool("team-config")
+SHAPE = tool("workflow-shape")
+
+
+def run(argv: List[Any], timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run([str(item) for item in argv], capture_output=True, text=True, timeout=timeout)
+
+
+def config_paths() -> Dict[str, str]:
+    result = run([TEAM_CONFIG, "paths", "--json"], timeout=20)
+    if result.returncode != 0:
+        fail("team-config paths failed")
+    return json.loads(result.stdout[result.stdout.index("{"):])
+
+
+def effective() -> Dict[str, Any]:
+    result = run([TEAM_CONFIG, "show", "--json"], timeout=20)
+    if result.returncode != 0:
+        fail("cannot read the effective roster")
+    return json.loads(result.stdout)
+
+
+def shape_ids() -> List[str]:
+    if SHAPE is None:
+        return [f"W{index}-" for index in range(11)]
+    result = run([SHAPE, "--list"], timeout=30)
+    ids = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if parts and parts[0].startswith("W"):
+            ids.append(parts[0])
+    return ids
+
+
+def read_overlay(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        return {"version": 4, "roles": {}, "local_roles": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"overlay is not valid JSON: {path} ({error})")
+    data.setdefault("version", 4)
+    data.setdefault("roles", {})
+    data.setdefault("local_roles", {})
+    return data
+
+
+def write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False,
+                                       prefix=".team.local.", suffix=".tmp")
+    try:
+        temp.write(json.dumps(data, indent=2) + "\n")
+        temp.flush()
+        os.fsync(temp.fileno())
+    finally:
+        temp.close()
+    os.replace(temp.name, path)
+
+
+def role_source(base: str) -> Path:
+    for candidate in (Path.home() / ".agents" / "agents" / f"{base}.md",
+                      Path.home() / ".config" / "herdr-team" / "roles" / f"{base}.md",
+                      Path(os.environ.get("HERDR_TEAM_REPO", "")) / ".agents" / "agents" / f"{base}.md"
+                      if os.environ.get("HERDR_TEAM_REPO") else None,
+                      HERE.parent / ".agents" / "agents" / f"{base}.md"):
+        if candidate and candidate.is_file():
+            return candidate
+    fail(f"no role text for base role '{base}' (run setup_harness.sh)")
+
+
+def local_role_entry(name: str, base: str, kind: str, shapes: List[str], team: Dict[str, Any],
+                     overlay: Dict[str, Any]) -> Dict[str, Any]:
+    source = (team.get("roles") or {}).get(base)
+    if not isinstance(source, dict):
+        fail(f"base role '{base}' is not in the roster")
+    entry = json.loads(json.dumps(source))
+    models = entry.get("models") or {}
+    runtime = (team.get("runtime_order") or list(models) or [""])[0]
+    allowed = list(models.get(runtime) or (next(iter(models.values()), []) or []))
+    if not allowed:
+        fail(f"base role '{base}' has no allowlisted model")
+    entry["model_selection"] = "fixed"
+    entry["models"] = {runtime: [allowed[0]]}
+    entry["default_model"] = allowed[0]
+    entry.pop("routing", None)
+    entry["reports_to"] = ["pm"]
+    entry["controls"] = []
+    entry["may_read_direct_reports"] = False
+    if kind == "worker":
+        if base not in WRITE_BASES:
+            # A cloned planner may never acquire write authority by renaming.
+            entry["repo_mode"] = "read_only"
+            entry["may_local_commit"] = False
+            entry["may_authorized_push"] = False
+            entry["may_authorized_pr_create"] = False
+    else:
+        entry["repo_mode"] = "read_only"
+        entry["may_local_commit"] = False
+        entry["may_authorized_push"] = False
+        entry["may_authorized_pr_create"] = False
+        entry["may_document_write"] = False
+    entry["may_remote_deliver"] = False
+    if kind == "documenter":
+        entry["may_document_write"] = True
+    overlay.setdefault("local_roles", {})[name] = {
+        "base": base,
+        "kind": kind,
+        "shapes": shapes,
+        "role_file": str(Path("~/.config/herdr-team/roles") / f"{name}.md"),
+    }
+    return entry
+
+
+def render_and_validate(overlay_path: Path, overlay: Dict[str, Any]) -> int:
+    write_json(overlay_path, overlay)
+    render = run([TEAM_CONFIG, "render"], timeout=30)
+    if render.returncode != 0:
+        fail(f"render failed: {render.stderr.strip()}")
+    check = run([TEAM_CONFIG, "validate"], timeout=180)
+    if check.returncode != 0:
+        print((check.stderr or check.stdout).strip(), file=sys.stderr)
+        return check.returncode
+    return 0
+
+
+def add(name: str, base: str, kind: str, shapes: List[str]) -> int:
+    if TEAM_CONFIG is None:
+        fail("team-config is not installed (run setup_harness.sh)")
+    team = effective()
+    built_in = set((team.get("roles") or {}).keys()) - set((team.get("local_roles") or {}).keys())
+    if not NAME_RE.match(name):
+        fail("a role name is lowercase letters, digits, and underscores, starting with a letter")
+    if name in built_in:
+        fail(f"'{name}' is a built-in role; pick another name")
+    if base not in built_in:
+        fail(f"base role '{base}' must be a built-in role")
+    if base in ("orchestrator", "pm", "supervisor"):
+        fail("controllers are not cloneable; clone a worker, planner, verifier, or documenter")
+    if kind not in KINDS:
+        fail(f"kind must be one of: {', '.join(sorted(KINDS))}")
+    expected = KIND_OF_BASE.get(base)
+    if expected and kind != expected:
+        fail(f"a clone of '{base}' is a {expected}, not a {kind}")
+
+    known = shape_ids()
+    unknown = [shape for shape in shapes if shape not in known]
+    if unknown:
+        fail(f"unknown shape(s): {', '.join(unknown)} (known: {', '.join(known)})")
+    if not shapes:
+        fail("declare at least one shape that may staff this role")
+
+    overlay_path = Path(config_paths()["overlay"])
+    overlay = read_overlay(overlay_path)
+    overlay.setdefault("roles", {})[name] = local_role_entry(name, base, kind, shapes, team, overlay)
+    backup = overlay_path.read_text(encoding="utf-8") if overlay_path.is_file() else None
+
+    roles_dir = Path.home() / ".config" / "herdr-team" / "roles"
+    roles_dir.mkdir(parents=True, exist_ok=True)
+    text = role_source(base).read_text(encoding="utf-8")
+    header = (f"<!-- local role: {name} · cloned from {base} · kind {kind} · "
+              f"staffable by {', '.join(shapes)} -->\n")
+    target = roles_dir / f"{name}.md"
+    previous_text = target.read_text(encoding="utf-8") if target.is_file() else None
+    target.write_text(header + text, encoding="utf-8")
+
+    claude_target = Path.home() / ".claude" / "agents" / f"herdr-{name}.md"
+    claude_target.parent.mkdir(parents=True, exist_ok=True)
+    previous_claude = claude_target.read_text(encoding="utf-8") if claude_target.is_file() else None
+    claude_target.write_text(header + text, encoding="utf-8")
+
+    code = render_and_validate(overlay_path, overlay)
+    if code != 0:
+        if backup is None:
+            overlay_path.unlink(missing_ok=True)
+        else:
+            overlay_path.write_text(backup, encoding="utf-8")
+        for path, previous in ((target, previous_text), (claude_target, previous_claude)):
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(previous, encoding="utf-8")
+        run([TEAM_CONFIG, "render"], timeout=30)
+        print("hteam-agent: change reverted", file=sys.stderr)
+        return 1
+    print(f"hteam agent: added '{name}' (from {base}, kind {kind}, shapes {', '.join(shapes)})")
+    print(f"  role text: {target}")
+    print(f"  overlay:   {overlay_path}")
+    return 0
+
+
+def remove(name: str) -> int:
+    paths = config_paths()
+    overlay_path = Path(paths["overlay"])
+    overlay = read_overlay(overlay_path)
+    local = overlay.get("local_roles") or {}
+    if name not in local:
+        fail(f"'{name}' is not a local role")
+    local.pop(name, None)
+    (overlay.get("roles") or {}).pop(name, None)
+    write_json(overlay_path, overlay)
+    for path in (Path.home() / ".config" / "herdr-team" / "roles" / f"{name}.md",
+                 Path.home() / ".claude" / "agents" / f"herdr-{name}.md"):
+        path.unlink(missing_ok=True)
+    run([TEAM_CONFIG, "render"], timeout=30)
+    print(f"hteam agent: removed '{name}'")
+    return 0
+
+
+def interactive() -> int:
+    team = effective()
+    built_in = sorted(set((team.get("roles") or {}).keys()) - set((team.get("local_roles") or {}).keys()))
+    clonable = [role for role in built_in if role in KIND_OF_BASE]
+    print("Roles that may be cloned:")
+    for index, role in enumerate(clonable, start=1):
+        print(f"  {index:>2}. {role} ({KIND_OF_BASE[role]})")
+    answer = input("Clone which base role? [1]: ").strip() or "1"
+    if not answer.isdigit() or not 1 <= int(answer) <= len(clonable):
+        print("  unknown choice")
+        return 2
+    base = clonable[int(answer) - 1]
+    name = input("New role name (lowercase snake_case): ").strip()
+    kind = KIND_OF_BASE[base]
+    print(f"  kind: {kind} (from {base})")
+    ids = shape_ids()
+    print("Shapes that may staff it:")
+    for index, shape in enumerate(ids, start=1):
+        print(f"  {index:>2}. {shape}")
+    raw = input("Shapes (numbers, comma separated): ").strip()
+    picks = [ids[int(part) - 1] for part in re.findall(r"\d+", raw) if 1 <= int(part) <= len(ids)]
+    if not picks:
+        print("  at least one shape is required")
+        return 2
+    print(f"\nAdd '{name}' from '{base}' ({kind}) staffable by {', '.join(picks)}? [y/N] ", end="")
+    if input().strip().lower() not in ("y", "yes"):
+        print("  aborted")
+        return 1
+    return add(name, base, kind, picks)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="hteam-agent", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--list", action="store_true", help="local roles and their shapes")
+    parser.add_argument("--json", action="store_true", help="machine-readable view")
+    parser.add_argument("--add", metavar="NAME")
+    parser.add_argument("--from", dest="base", metavar="BASE")
+    parser.add_argument("--kind")
+    parser.add_argument("--shapes", help="comma list, for example W3-fix,W4-fix-test")
+    parser.add_argument("--remove", metavar="NAME")
+    args = parser.parse_args()
+
+    if TEAM_CONFIG is None:
+        fail("team-config is not installed (run setup_harness.sh)")
+
+    if args.remove:
+        return remove(args.remove)
+
+    if args.list or args.json:
+        team = effective()
+        local = team.get("local_roles") or {}
+        if args.json:
+            print(json.dumps({"schema": 1, "local_roles": local}, indent=2))
+            return 0
+        if not local:
+            print("hteam agent: no local roles")
+            return 0
+        for name, entry in sorted(local.items()):
+            print(f"{name:<20}{entry.get('kind',''):<12}{entry.get('base',''):<12}{', '.join(entry.get('shapes') or [])}")
+        return 0
+
+    if args.add:
+        if not args.base:
+            fail("--add needs --from <built-in role>")
+        if not args.shapes:
+            fail("--add needs --shapes <W3-fix,...>")
+        shapes = [item.strip() for item in args.shapes.split(",") if item.strip()]
+        return add(args.add, args.base, args.kind or KIND_OF_BASE.get(args.base, ""), shapes)
+
+    if not sys.stdin.isatty():
+        print("hteam-agent: interactive mode needs a TTY; use --add, --remove, --list, or --json",
+              file=sys.stderr)
+        return 2
+    return interactive()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
