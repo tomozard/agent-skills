@@ -12,7 +12,7 @@ installed machine refreshes by re-running the installer.
 | git tag | `v<version>`, created from the release commit |
 | installed harness | re-run by the installer from the repository |
 
-Keep them equal. `npx herdr-agent-team@0.2.0`, tag `v0.2.0`, and `package.json`
+Keep them equal. `npx herdr-agent-team@0.2.1`, tag `v0.2.1`, and `package.json`
 `0.2.0` are the same release.
 
 ## Steps
@@ -80,7 +80,7 @@ Keep them equal. `npx herdr-agent-team@0.2.0`, tag `v0.2.0`, and `package.json`
 | What they want | Command |
 |---|---|
 | the installer at the newest release | `npx -y herdr-agent-team@latest --yes` |
-| a pinned installer | `npx -y herdr-agent-team@0.2.0 --yes` |
+| a pinned installer | `npx -y herdr-agent-team@0.2.1 --yes` |
 | refresh an installed machine | `npx -y herdr-agent-team@latest --yes` (re-runs the skill layer, the runtime, and the deep check) |
 | refresh only the skill layer | `npx skills update herdr-agent-team -g -y` |
 

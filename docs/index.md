@@ -104,7 +104,7 @@ check:
 npx -y herdr-agent-team@latest --yes
 ```
 
-Pinned: `npx -y herdr-agent-team@0.2.0 --yes`. Straight from the repository:
+Pinned: `npx -y herdr-agent-team@0.2.1 --yes`. Straight from the repository:
 `npx -y github:tomozard/agent-skills --yes`.
 
 What that does, in order:

@@ -36,7 +36,7 @@ hteam
 `hteam health` re-checks the machine at any time and exits `3` when it cannot run
 the team.
 
-Pinned to a version: `npx -y herdr-agent-team@0.2.0 --yes`. Installing straight
+Pinned to a version: `npx -y herdr-agent-team@0.2.1 --yes`. Installing straight
 from the repository works too: `npx -y github:tomozard/agent-skills --yes`.
 
 The skills CLI copies files and cannot run install scripts, so this wrapper runs
