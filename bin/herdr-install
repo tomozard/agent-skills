@@ -211,11 +211,16 @@ else
 fi
 
 echo "herdr-install: verify"
-if "$HTEAM" check --deep; then
+if VERIFY_OUTPUT="$("$HTEAM" check --deep 2>&1)"; then
+  printf '%s\n' "$VERIFY_OUTPUT"
   printf '%s herdr-install done\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOG_FILE"
   echo "herdr-install: done — run 'hteam' to open a team, or '/hteam setup' in Pi"
+  if ! "$HOME/.local/bin/herdr-app" status >/dev/null 2>&1; then
+    echo "  note: Herdr.app is not running; open it before 'hteam'"
+  fi
 else
+  printf '%s\n' "$VERIFY_OUTPUT" >&2
   printf '%s herdr-install check-failed\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LOG_FILE"
-  echo "herdr-install: check --deep failed; rerun $INSTALLER and read the MISS lines" >&2
+  echo "herdr-install: verification failed (see the lines above); rerun $INSTALLER to repair" >&2
   exit 1
 fi

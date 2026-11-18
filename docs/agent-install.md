@@ -217,7 +217,7 @@ Handoff message template (Thai):
 |---|---|---|
 | `PyYAML is missing` | interpreter without PyYAML | `python3 -m pip install --user pyyaml`, re-run |
 | `herdr-app not found`, or the installer's preflight exits 3 | Herdr absent or not opened | stop, give the Human <https://herdr.dev/download/> and the installer line from Step 0; never pass `--allow-no-herdr` to get past this |
-| `Herdr app window is not reachable` | app closed | open Herdr.app, re-run `hteam check` |
+| `Herdr app window is not reachable` | app closed | open Herdr.app; the install is complete and `hteam check` passes with a warning. Do not reinstall for this |
 | `pi CLI not found` | no Pi runtime | stop, ask the Human |
 | `the agent-skills tooling is missing` | skill layer not installed | run `npx skills add tomozard/agent-skills/skills/herdr-agent-team -g -y -a pi claude-code`, then the installer |
 | `[STUCK] no launchable pair` | no installed, enabled, allowlisted model on that route | report the role and tier; do not substitute a model |

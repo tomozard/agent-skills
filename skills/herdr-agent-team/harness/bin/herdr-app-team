@@ -179,9 +179,18 @@ command -v pi >/dev/null 2>&1 || die "pi CLI not found (this runtime drives Pi v
 
 APP_STATUS="$("$APP" status 2>/dev/null || true)"
 case "$APP_STATUS" in
-  *'"error"'*|"") die "the Herdr app window is not reachable — open Herdr.app, then retry" ;;
+  *'"error"'*|"")
+    if [ "$MODE" = "check" ]; then
+      # `check` reports readiness; a closed window is a state to fix before start,
+      # not a broken install. Failing here made the installer's post-install
+      # verification report failure on a machine where everything was installed.
+      echo "  warn: Herdr.app is not running (open it before starting the team)" >&2
+    else
+      die "the Herdr app window is not reachable — open Herdr.app, then retry"
+    fi
+    ;;
+  *) ok "herdr app reachable" ;;
 esac
-ok "herdr app reachable"
 
 if [ "$MODE" = "check" ]; then
   echo "  ok:   repo: $REPO"

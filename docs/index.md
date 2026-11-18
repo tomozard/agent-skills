@@ -503,7 +503,7 @@ force-push, delete a branch, or tag.
 |---|---|---|
 | installer stops: `PyYAML is missing` | no PyYAML for this account | `python3 -m pip install --user pyyaml`, re-run |
 | `herdr-app not found` | Herdr not installed or never opened | install from <https://herdr.dev/download/> (or the one-liner in Step 0), open once, check `~/.local/bin/herdr-app` |
-| `the Herdr app window is not reachable` | app closed | open Herdr.app and retry |
+| `the Herdr app window is not reachable` | Herdr.app is closed | open Herdr.app. Installation still verifies (`hteam check` warns, it does not fail); only starting the team needs the window |
 | `pi CLI not found` | no Pi runtime | install Pi, or make sure it is on `PATH` |
 | `Already inside a team terminal` | the pane already runs a role | talk to that role's controller; do not open a second team |
 | `[STUCK] no launchable pair` | the roster route has no installed, enabled, allowlisted model | fix `team.json` or install the runtime — never substitute a model |

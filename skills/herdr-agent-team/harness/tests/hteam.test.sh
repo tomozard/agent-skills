@@ -66,7 +66,7 @@ chmod +x "$TMP/app" "$TMP/hc"
 steam() {
   STUB_LOG="$TMP/calls.log" \
     PATH="$ROOT/bin:$PATH" \
-    HERDR_APP_BIN="$TMP/app" HC_BIN="$TMP/hc" \
+    HERDR_APP_BIN="${HERDR_APP_BIN:-$TMP/app}" HC_BIN="$TMP/hc" \
     HERDR_TEAM_REPO="$ROOT" HERDR_TEAM_REGISTRY="$TMP/registry.yaml" \
     HERDR_TEAM_VAULT="$TMP/vault" HERDR_TEAM_ACTIVITY_LOG="$TMP/vault/log.md" \
     HERDR_TEAM_CWD="$TMP/work" HERDR_TEAM_STATE_DIR="$TMP/state" \
@@ -99,6 +99,26 @@ ok "voice defaults to off"
 OUT="$(steam check --voice on 2>&1)" || fail "check --voice on failed: $OUT"
 printf '%s' "$OUT" | grep -q "voice: on" || fail "check did not report voice: on: $OUT"
 ok "check reports voice: on"
+
+# --- 4a. a closed app window is a warning for check, a refusal for start ---
+cat > "$TMP/app-closed" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  status) printf '{"error":"closed"}' ;;
+  *) printf '{}' ;;
+esac
+STUB
+chmod +x "$TMP/app-closed"
+OUT="$(HERDR_APP_BIN="$TMP/app-closed" steam check 2>&1)" \
+  || fail "check failed when only the app window was closed: $OUT"
+printf '%s' "$OUT" | grep -q "Herdr.app is not running" \
+  || fail "check did not warn about the closed app window: $OUT"
+printf '%s' "$OUT" | grep -q "check passed" \
+  || fail "check did not pass with a closed app window: $OUT"
+if HERDR_APP_BIN="$TMP/app-closed" steam >/dev/null 2>&1; then
+  fail "start accepted a closed app window"
+fi
+ok "check warns but passes when Herdr.app is closed; start still refuses"
 
 # --- 4b. check --deep names a missing install ------------------------------
 mkdir -p "$TMP/bare-home"
