@@ -1,6 +1,6 @@
 {
   "name": "herdr-agent-team",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A multi-agent delivery team for real repositories: resolved staffing, a frozen-diff verification gate, and human commit tokens. Ships the installer, health check, setup wizard, and role/routing tooling.",
   "bin": {
     "herdr-agent-team": "bin/herdr-install",

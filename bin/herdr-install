@@ -41,10 +41,13 @@ ALLOW_NO_HERDR=0
 
 usage() {
   cat <<'EOF'
-Usage: herdr-install [install|health|version] [options]
+Usage: herdr-install [install|health|setup|model|agent|version] [options]
 
   install (default)  install the policy layer and the runtime, then verify
   health [--json]    machine readiness; writes nothing and starts no model
+  setup              guided setup: folder, vault, registry, voice
+  model              inspect or pin model routing
+  agent              list, clone, or remove a machine-local role
   version            print the package version
 
 Health runs before anything is installed, so a fresh machine can be inspected
@@ -62,14 +65,17 @@ EOF
 }
 
 # Subcommands. `install` stays the default so the previous one-argument form keeps
-# working; `health` and `version` never touch $HOME.
-health_dispatch() {
-  local bin="$PACKAGE_ROOT/skills/herdr-agent-team/harness/bin/hteam-health"
+# working; every other subcommand is a tool that ships in this package, so it runs
+# before anything is installed.
+tool_dispatch() {
+  local name="$1"
+  shift
+  local bin="$PACKAGE_ROOT/skills/herdr-agent-team/harness/bin/hteam-$name"
   if [ ! -x "$bin" ]; then
-    bin="$(command -v hteam-health 2>/dev/null || true)"
+    bin="$(command -v "hteam-$name" 2>/dev/null || true)"
   fi
   if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-    echo "herdr-install: health checker not found in the package" >&2
+    echo "herdr-install: $name tool not found in the package" >&2
     exit 2
   fi
   exec "$bin" "$@"
@@ -83,25 +89,13 @@ version_dispatch() {
 COMMAND="install"
 case "${1:-}" in
   install) COMMAND="install"; shift ;;
-  health) COMMAND="health"; shift ;;
+  health|setup|model|agent) COMMAND="$1"; shift ;;
   version|--version) COMMAND="version"; shift ;;
-  setup) COMMAND="setup"; shift ;;
 esac
 
 case "$COMMAND" in
-  health) health_dispatch "$@" ;;
+  health|setup|model|agent) tool_dispatch "$COMMAND" "$@" ;;
   version) version_dispatch; exit 0 ;;
-  setup)
-    SETUP_BIN="$PACKAGE_ROOT/skills/herdr-agent-team/harness/bin/hteam-setup"
-    if [ ! -x "$SETUP_BIN" ]; then
-      SETUP_BIN="$(command -v hteam-setup 2>/dev/null || true)"
-    fi
-    if [ -z "$SETUP_BIN" ] || [ ! -x "$SETUP_BIN" ]; then
-      echo "herdr-install: setup wizard not found in the package" >&2
-      exit 2
-    fi
-    exec "$SETUP_BIN" "$@"
-    ;;
 esac
 
 while [ "$#" -gt 0 ]; do
