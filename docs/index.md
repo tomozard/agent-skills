@@ -76,6 +76,12 @@ Or download the app: <https://herdr.dev/download/>. Nothing in this skill instal
 Herdr for you: the installer's preflight and `hteam check` name the download page
 and stop.
 
+Check the whole host with one read-only command (it installs nothing):
+
+```bash
+npx -y github:tomozard/agent-skills health
+```
+
 Then open Herdr once. `~/.local/bin/herdr-app` and `~/.local/bin/herdr-core` must
 both exist. `npx … --yes` verifies this before it writes anything:
 
@@ -383,6 +389,7 @@ Repeat `roster ROLE TIER` for each role and tier you touched. A route that print
 |---|---|
 | `hteam` | start or report the Orchestrator in the app |
 | `hteam check`, `hteam check --deep` | prerequisites, then installed-artifact integrity |
+| `hteam health`, `hteam health --json` | readiness: host, Herdr, runtimes, install, routing, vault, voice — exit `3` when the host cannot run the team |
 | `hteam-config show`, `set`, `validate` | read and write per-machine config |
 | `hteam-dispatch <role> --brief F --request "…" --risk low` | one call: intake → shape → spawn, and it refuses a role the shape does not staff |
 | `hteam-dispatch --explain --request "…" --risk low` | print the resolved shape without spawning |
@@ -462,9 +469,9 @@ Authoritative, in the repository:
 
 Known gaps, in priority order:
 
-1. **`hteam health`** — one preflight that reports every missing prerequisite at
-   once, plus the nine shared contracts above. `hteam check` stops at the first
-   failure and never validates routing.
+1. **`hteam health` follow-ups** — it covers the host, Herdr, runtimes, install,
+   routing, workspace, and voice; a per-project scope and a `--fix` for missing
+   artifacts are still open.
 2. **`hteam model`** — a wizard for routing, writing a layered
    `team.local.json` so `npx skills update` cannot silently revert a model choice.
 3. **`hteam agent`** — a constrained "clone a role contract" wizard; a brand-new

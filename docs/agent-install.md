@@ -40,10 +40,23 @@ they confirm it is installed and opened once.
 `MISS` line stops it with exit `3` before anything is written. `--allow-no-herdr`
 is the only way past it, and it is for a machine that is being prepared.
 
-Run the preflight below only after that.
+### Step 0a — the one-command check
 
-Run all of it, then report every failure together. Do not start installing until
-the block is clean.
+This is authoritative, writes nothing, and starts no model:
+
+```bash
+npx -y github:tomozard/agent-skills health --json
+```
+
+Read `status`, `host_ready`, and every `checks[]` entry whose `status` is `fail`
+or `warn`. Exit `3` means this host cannot run the team (Herdr or Pi missing);
+exit `1` means something else is broken. Act on the `hint` of each failing entry
+before installing.
+
+### Step 0b — the manual list (fallback)
+
+Use it when the command cannot run (no Node, no network). Run all of it, then
+report every failure together.
 
 ```bash
 uname -s                                  # must print Darwin
@@ -58,7 +71,7 @@ case ":$PATH:" in *":$HOME/bin:"*) echo "PATH ok";; *) echo "PATH missing ~/bin"
 
 | Result | Meaning | Action |
 |---|---|---|
-| `uname -s` is not `Darwin` | this harness is macOS-only today (Herdr itself also runs on Linux and Windows) | stop; report that the harness needs macOS |
+| `uname -s` is not `Darwin` (or `platform` fails in `health`) | this harness is macOS-only today (Herdr itself also runs on Linux and Windows) | stop; report that the harness needs macOS |
 | `herdr-app` or `herdr-core` missing | Herdr is not installed, or was never opened | give the Human <https://herdr.dev/download/>; macOS/Linux `curl -fsSL https://releases.herdr.dev/app/install.sh \| sh`, Windows `irm https://releases.herdr.dev/app/install.ps1 \| iex`; open Herdr once; stop until both binaries exist |
 | `pi` missing | the Orchestrator and PM run on Pi | stop; ask the Human to install and authenticate Pi |
 | `claude` missing | critical routes lose their primary | continue, but tell the Human: some `critical` work will be `[STUCK]` |

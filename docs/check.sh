@@ -30,6 +30,7 @@ COMMANDS = {
     "hteam-config": skill / "harness/bin/hteam-config",
     "hteam-dispatch": skill / "harness/bin/hteam-dispatch",
     "hteam-shutdown": skill / "harness/bin/hteam-shutdown",
+    "hteam-health": skill / "harness/bin/hteam-health",
     "agent-runtime": skill / "harness/bin/agent-runtime",
     "spawn-agent": skill / "harness/bin/spawn-agent",
     "herdr-app-spawn-role": skill / "harness/bin/herdr-app-spawn-role",

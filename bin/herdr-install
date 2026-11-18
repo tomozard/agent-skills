@@ -14,6 +14,7 @@
 # --allow-no-herdr installs the harness anyway (a machine that is being prepared).
 set -euo pipefail
 
+PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILL_REPO="tomozard/agent-skills/skills/herdr-agent-team"
 AGENTS="pi claude-code"
 SKILL_DIR="${HERDR_AGENT_TEAM_SKILL_DIR:-$HOME/.agents/skills/herdr-agent-team}"
@@ -29,10 +30,16 @@ ALLOW_NO_HERDR=0
 
 usage() {
   cat <<'EOF'
-Usage: herdr-install [--yes] [--dry-run] [--skip-validate] [--allow-no-herdr]
+Usage: herdr-install [install|health|version] [options]
 
-Install the herdr-agent-team policy layer (npx skills add) and its runtime
-layer (the payload's setup_harness.sh), then verify with `hteam check --deep`.
+  install (default)  install the policy layer and the runtime, then verify
+  health [--json]    machine readiness; writes nothing and starts no model
+  version            print the package version
+
+Health runs before anything is installed, so a fresh machine can be inspected
+with no side effects:  npx -y github:tomozard/agent-skills health
+
+Install options:
 
   --yes              run the install; without it only the plan is printed
   --dry-run          print the plan and the Herdr preflight, exit 0
@@ -42,6 +49,43 @@ layer (the payload's setup_harness.sh), then verify with `hteam check --deep`.
 Exit codes: 0 ok, 1 waiting for --yes, 2 bad arguments, 3 Herdr is missing.
 EOF
 }
+
+# Subcommands. `install` stays the default so the previous one-argument form keeps
+# working; `health` and `version` never touch $HOME.
+health_dispatch() {
+  local bin="$PACKAGE_ROOT/skills/herdr-agent-team/harness/bin/hteam-health"
+  if [ ! -x "$bin" ]; then
+    bin="$(command -v hteam-health 2>/dev/null || true)"
+  fi
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    echo "herdr-install: health checker not found in the package" >&2
+    exit 2
+  fi
+  exec "$bin" "$@"
+}
+
+version_dispatch() {
+  python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["version"])' \
+    "$PACKAGE_ROOT/package.json" 2>/dev/null || echo unknown
+}
+
+COMMAND="install"
+case "${1:-}" in
+  install) COMMAND="install"; shift ;;
+  health) COMMAND="health"; shift ;;
+  version|--version) COMMAND="version"; shift ;;
+  setup) COMMAND="setup"; shift ;;
+esac
+
+case "$COMMAND" in
+  health) health_dispatch "$@" ;;
+  version) version_dispatch; exit 0 ;;
+  setup)
+    echo "herdr-install: setup is not implemented yet." >&2
+    echo "  install the harness, then configure it with hteam-config or /hteam setup" >&2
+    exit 2
+    ;;
+esac
 
 while [ "$#" -gt 0 ]; do
   case "$1" in

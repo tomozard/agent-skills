@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""Health check for the Herdr agent team: is this machine ready to run it?
+
+One command, one verdict. Every check answers the same question the launcher
+would ask, and reports it as ok / warn / fail / skip with a hint. It never
+writes, never installs, and never reads a transcript.
+
+  hteam-health                 human table
+  hteam-health --json          machine-readable (schema 1)
+  hteam-health --section host  only one section
+
+Exit codes: 0 healthy, 1 something is broken, 3 this host cannot run the team
+(Herdr or Pi missing). Skipped checks are not failures: before the harness is
+installed, artifact checks are skipped by design.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+SCHEMA = 1
+SECTIONS = ("host", "herdr", "runtimes", "install", "policy", "workspace", "voice")
+
+
+def env_path(name: str, default: Optional[Path] = None) -> Optional[Path]:
+    value = os.environ.get(name, "")
+    return Path(value).expanduser() if value else default
+
+
+def skill_dir() -> Path:
+    """Where the payload lives: the checkout (repo) or the installed skill."""
+    for candidate in (
+        env_path("HERDR_AGENT_TEAM_SKILL_DIR"),
+        Path(__file__).resolve().parents[2],
+        Path.home() / ".agents" / "skills" / "herdr-agent-team",
+    ):
+        if candidate and (candidate / "scripts" / "workflow-shape").is_file():
+            return candidate
+    return Path.home() / ".agents" / "skills" / "herdr-agent-team"
+
+
+def team_file(skill: Path) -> Path:
+    for candidate in (
+        env_path("HERDR_TEAM_FILE"),
+        Path.home() / ".agents" / "team.json",
+        skill / "config" / "team.json",
+    ):
+        if candidate and candidate.is_file():
+            return candidate
+    return skill / "config" / "team.json"
+
+
+class Report:
+    def __init__(self) -> None:
+        self.checks: List[Dict[str, Any]] = []
+
+    def add(self, section: str, item: str, status: str, detail: str, hint: str = "") -> None:
+        self.checks.append(
+            {"section": section, "id": item, "status": status, "detail": detail, "hint": hint}
+        )
+
+    def count(self, status: str) -> int:
+        return sum(1 for check in self.checks if check["status"] == status)
+
+    def host_ready(self) -> bool:
+        return not any(
+            check["id"] in ("herdr-app", "herdr-core", "pi") and check["status"] == "fail"
+            for check in self.checks
+        )
+
+    def status(self) -> str:
+        if self.count("fail"):
+            return "fail"
+        if self.count("warn"):
+            return "warn"
+        return "ok"
+
+    def exit_code(self) -> int:
+        if not self.host_ready():
+            return 3
+        if self.count("fail"):
+            return 1
+        return 0
+
+
+def run(argv: List[str], timeout: int = 10) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def first_line(text: str) -> str:
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def version_of(binary: str) -> str:
+    try:
+        result = run([binary, "--version"])
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    output = first_line(result.stdout or result.stderr)
+    for token in output.replace("(", " ").replace(")", " ").split():
+        value = token[1:] if token[:1] in ("v", "V") else token
+        if value[:1].isdigit():
+            return value
+    return ""
+
+
+def find_binary(env_name: str, names: List[str]) -> Optional[Path]:
+    # An explicit override is authoritative: HERDR_APP_BIN=/nope means "missing",
+    # not "fall back to PATH", so a caller can test the absent branch.
+    override = env_path(env_name)
+    if override is not None:
+        return override if override.is_file() else None
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
+
+
+def check_host(report: Report) -> None:
+    system = platform.system()
+    if system == "Darwin":
+        report.add("host", "platform", "ok", f"macOS {platform.mac_ver()[0]} ({platform.machine()})")
+    else:
+        report.add(
+            "host", "platform", "fail", system,
+            "the harness launchers are bash and the voice helper uses afplay; "
+            "Herdr itself also runs on Linux and Windows, this harness does not yet",
+        )
+
+    node = shutil.which("node")
+    if node:
+        report.add("host", "node", "ok", f"{version_of('node')} ({node})", "needed by npx at install time")
+    else:
+        report.add("host", "node", "warn", "not found", "install Node 18+ to use the npx installer")
+
+    python = shutil.which("python3")
+    if python:
+        report.add("host", "python3", "ok", f"{version_of('python3')} ({python})")
+    else:
+        report.add("host", "python3", "fail", "not found", "the tools are Python: install python3")
+
+    yaml_ok = False
+    if python:
+        try:
+            yaml_ok = run([python, "-c", "import yaml"], timeout=15).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            yaml_ok = False
+    if yaml_ok:
+        report.add("host", "pyyaml", "ok", "importable")
+    else:
+        report.add(
+            "host", "pyyaml", "fail", "not importable",
+            "python3 -m pip install --user pyyaml  (clickup-status and the registry need it)",
+        )
+
+    git = shutil.which("git")
+    if git:
+        report.add("host", "git", "ok", version_of("git"))
+    else:
+        report.add("host", "git", "fail", "not found", "scope locks, diff freeze and guards need git")
+
+    bin_dir = Path.home() / "bin"
+    path_parts = [Path(part).expanduser() for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    if bin_dir in path_parts:
+        report.add("host", "path", "ok", f"{bin_dir} is on PATH")
+    else:
+        report.add(
+            "host", "path", "warn", f"{bin_dir} is not on PATH",
+            'add: export PATH="$HOME/bin:$PATH"',
+        )
+
+
+def check_herdr(report: Report) -> None:
+    app = find_binary("HERDR_APP_BIN", ["herdr-app"])
+    core = find_binary("HC_BIN", ["herdr-core", "hc"])
+    if app:
+        report.add("herdr", "herdr-app", "ok", f"{version_of(str(app))} ({app})")
+    else:
+        report.add(
+            "herdr", "herdr-app", "fail", "not found",
+            "install Herdr: https://herdr.dev/download/  "
+            "macOS/Linux: curl -fsSL https://releases.herdr.dev/app/install.sh | sh",
+        )
+    if core:
+        report.add("herdr", "herdr-core", "ok", f"{version_of(str(core))} ({core})")
+    else:
+        report.add(
+            "herdr", "herdr-core", "fail", "not found",
+            "open Herdr once, or re-run its installer so herdr-core lands in ~/.local/bin",
+        )
+    if app:
+        try:
+            alive = run([str(app), "status"], timeout=8).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            alive = False
+        if alive:
+            report.add("herdr", "herdr-app-status", "ok", "the app window answers")
+        else:
+            report.add(
+                "herdr", "herdr-app-status", "warn", "the app window does not answer",
+                "open Herdr.app, then re-run health",
+            )
+
+
+def check_runtimes(report: Report, team: Dict[str, Any]) -> None:
+    allowed = {
+        runtime
+        for role in (team.get("roles") or {}).values()
+        for runtime in (role.get("models") or {})
+    }
+    pi = shutil.which("pi")
+    if pi:
+        report.add("runtimes", "pi", "ok", f"{version_of('pi')} ({pi})")
+    else:
+        report.add(
+            "runtimes", "pi", "fail", "not found",
+            "the Orchestrator and PM run on Pi; install it and authenticate before starting a team",
+        )
+
+    claude = shutil.which("claude")
+    if claude:
+        report.add("runtimes", "claude", "ok", f"{version_of('claude')} ({claude})")
+    elif "claude" in allowed:
+        report.add(
+            "runtimes", "claude", "warn", "not found",
+            "several critical routes use Claude; without it some roles have no usable pair",
+        )
+
+    for name in ("codex", "opencode", "kiro-cli", "hermes"):
+        found = shutil.which(name)
+        if found:
+            report.add(
+                "runtimes", f"{name}-unsupported", "warn", f"detected ({found})",
+                "detected but not routable: agent-runtime only launches pi and claude",
+            )
+
+
+def installed_marker() -> bool:
+    return (Path.home() / "bin" / "hteam").exists()
+
+
+def check_install(report: Report) -> None:
+    bin_dir = Path.home() / "bin"
+    agents_home = Path.home() / ".agents"
+    if not installed_marker():
+        report.add(
+            "install", "harness", "skip", "not installed",
+            "run: npx -y github:tomozard/agent-skills --yes",
+        )
+        return
+
+    manifest = agents_home / "project-scaffold-bin-files.txt"
+    if not manifest.is_file():
+        report.add("install", "manifest", "fail", "missing ~/.agents/project-scaffold-bin-files.txt",
+                   "re-run the installer")
+    else:
+        missing = [
+            name for name in manifest.read_text(encoding="utf-8").split()
+            if name and not (bin_dir / name).exists()
+        ]
+        if missing:
+            report.add("install", "binaries", "fail", f"{len(missing)} missing",
+                       "re-run the installer: " + ", ".join(missing[:5]))
+        else:
+            count = len([line for line in manifest.read_text().split() if line])
+            report.add("install", "binaries", "ok", f"{count} commands in {bin_dir}")
+
+    for label, path, hint in (
+        ("agents", agents_home / "agents", "role prompts are missing; re-run the installer"),
+        ("extensions", agents_home / "extensions", "Pi extensions are missing; re-run the installer"),
+        ("guards", agents_home / "guard-bin", "Git guards are missing; re-run the installer"),
+        ("hteam-extension", Path.home() / ".pi/agent/extensions/hteam.ts", "the /hteam command is missing; re-run the installer"),
+    ):
+        if path.exists():
+            report.add("install", label, "ok", str(path))
+        else:
+            report.add("install", label, "fail", f"missing {path}", hint)
+
+    claude_agents = Path.home() / ".claude" / "agents"
+    found = len(list(claude_agents.glob("herdr-*.md"))) if claude_agents.is_dir() else 0
+    if found:
+        report.add("install", "claude-agents", "ok", f"{found} role files")
+    else:
+        report.add("install", "claude-agents", "warn", "none", "Claude roles are missing; re-run the installer")
+
+
+def check_policy(report: Report, skill: Path, team_path: Path) -> None:
+    try:
+        team = json.loads(team_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        report.add("policy", "team-json", "fail", f"unreadable: {team_path} ({error})",
+                   "fix ~/.agents/team.json before spawning any role")
+        return
+    report.add("policy", "team-json", "ok", f"version {team.get('version')} ({team_path})")
+    if team.get("version") != 4:
+        report.add("policy", "team-json-version", "warn", f"version {team.get('version')}",
+                   "schema v4 is the supported shape")
+
+    roster = skill / "scripts" / "roster"
+    roles = sorted((team.get("roles") or {}).keys())
+    if not roster.is_file():
+        report.add("policy", "roster", "skip", "resolver not found", "install the skill layer first")
+        return
+
+    stuck = []
+    for role in roles:
+        for tier in ("standard", "critical"):
+            try:
+                result = run([str(roster), "--team", str(team_path), role, tier], timeout=20)
+            except (OSError, subprocess.SubprocessError):
+                stuck.append(f"{role}/{tier}: resolver failed")
+                continue
+            if result.returncode == 3:
+                stuck.append(f"{role}/{tier}: no launchable pair")
+    total = len(roles) * 2
+    if stuck:
+        report.add("policy", "routes", "fail", f"{len(stuck)}/{total} routes stuck",
+                   "; ".join(stuck[:3]))
+    else:
+        report.add("policy", "routes", "ok", f"{total}/{total} role/tier routes resolve")
+
+    disabled = team.get("disabled_model_providers") or []
+    if disabled:
+        report.add("policy", "disabled-providers", "warn", ", ".join(disabled),
+                   "confirm every route that used them still has an enabled alternate")
+
+
+def check_workspace(report: Report, config: Optional[Dict[str, str]]) -> None:
+    if not config:
+        report.add("workspace", "config", "skip", "hteam-config not installed",
+                   "run the installer, then /hteam setup")
+        return
+    registry = Path(config.get("registry", "")).expanduser()
+    if not registry.is_file():
+        report.add("workspace", "registry", "fail", f"missing {registry}",
+                   "write the workspace registry (setup.md phase 5) or set HERDR_TEAM_REGISTRY")
+    else:
+        try:
+            import yaml  # type: ignore
+            data = yaml.safe_load(registry.read_text(encoding="utf-8")) or {}
+            projects = data.get("projects") or {}
+            report.add("workspace", "registry", "ok", f"{len(projects)} projects ({registry})")
+            gone = [name for name, entry in projects.items()
+                    if not Path(str((entry or {}).get("path", ""))).expanduser().exists()]
+            if gone:
+                report.add("workspace", "registry-paths", "fail", f"{len(gone)} stale: {', '.join(gone[:3])}",
+                           "fix the path in the registry or remove the entry")
+            else:
+                report.add("workspace", "registry-paths", "ok", "every project path exists")
+        except Exception as error:  # noqa: BLE001 - yaml errors are not one class
+            report.add("workspace", "registry", "fail", f"unparseable: {error}",
+                       "the registry is YAML; fix the syntax")
+
+    vault = Path(config.get("vault", "")).expanduser()
+    log = Path(config.get("activity_log", "")).expanduser()
+    if vault.is_dir():
+        report.add("workspace", "vault", "ok", str(vault))
+    else:
+        report.add("workspace", "vault", "warn", f"missing {vault}",
+                   "mkdir it, then: hteam-config set vault <path> activity_log <path>/log.md")
+    if log.is_file():
+        report.add("workspace", "activity-log", "ok", str(log))
+    else:
+        report.add("workspace", "activity-log", "warn", f"missing {log}",
+                   "the Documenter appends completion entries here")
+
+
+def check_voice(report: Report, config: Optional[Dict[str, str]]) -> None:
+    mode = (os.environ.get("HERDR_VOICE_MODE") or (config or {}).get("voice") or "off").lower()
+    if mode != "on":
+        report.add("voice", "mode", "ok", "off")
+        return
+    report.add("voice", "mode", "ok", "on")
+    helper = Path.home() / ".config" / "herdr" / "tts-thai.sh"
+    if helper.is_file():
+        report.add("voice", "tts", "ok", str(helper))
+    else:
+        report.add("voice", "tts", "fail", "missing tts helper", "re-run the installer")
+    gtts = shutil.which("gtts-cli")
+    omni = Path.home() / "bin" / "tts-speak-omni"
+    if gtts or omni.is_file():
+        report.add("voice", "engine", "ok", str(gtts or omni))
+    else:
+        report.add("voice", "engine", "warn", "no gTTS or VoiceStudio helper",
+                   "voice will stay silent; install gtts-cli or start VoiceStudio")
+
+
+def load_config() -> Optional[Dict[str, str]]:
+    config_bin = shutil.which("hteam-config") or Path.home() / "bin" / "hteam-config"
+    if not Path(str(config_bin)).is_file():
+        return None
+    try:
+        result = run([str(config_bin), "show", "--json"], timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    values = data.get("values") if isinstance(data, dict) else None
+    return values if isinstance(values, dict) else data
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="hteam-health", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--section", choices=SECTIONS, action="append",
+                        help="only these sections (repeatable)")
+    args = parser.parse_args()
+
+    skill = skill_dir()
+    team_path = team_file(skill)
+    config = load_config()
+
+    report = Report()
+    team: Dict[str, Any] = {}
+    if team_path.is_file():
+        try:
+            team = json.loads(team_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            team = {}
+
+    check_host(report)
+    check_herdr(report)
+    check_runtimes(report, team)
+    check_install(report)
+    check_policy(report, skill, team_path)
+    check_workspace(report, config)
+    check_voice(report, config)
+
+    if args.section:
+        wanted = set(args.section)
+        report.checks = [check for check in report.checks if check["section"] in wanted]
+
+    status = report.status()
+    code = report.exit_code()
+
+    if args.json:
+        print(json.dumps({
+            "schema": SCHEMA,
+            "status": status,
+            "host_ready": report.host_ready(),
+            "installed": installed_marker(),
+            "checks": report.checks,
+            "summary": {name: report.count(name) for name in ("ok", "warn", "fail", "skip")},
+        }, indent=2))
+    else:
+        symbols = {"ok": "ok  ", "warn": "warn", "fail": "FAIL", "skip": "skip"}
+        current = None
+        for check in report.checks:
+            if check["section"] != current:
+                current = check["section"]
+                print(f"\n{current}")
+            print(f"  {symbols[check['status']]} {check['id']:<20} {check['detail']}")
+            if check["hint"]:
+                print(f"       hint: {check['hint']}")
+        counts = {name: report.count(name) for name in ("ok", "warn", "fail", "skip")}
+        verdict = {"ok": "healthy", "warn": "healthy with warnings", "fail": "not healthy"}[status]
+        print(f"\n{verdict}: {counts['ok']} ok, {counts['warn']} warn, "
+              f"{counts['fail']} fail, {counts['skip']} skipped")
+        if not report.host_ready():
+            print("this host cannot run the team yet: fix the FAIL lines in herdr/runtimes")
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -22,7 +22,8 @@ Python 3 with PyYAML.
 ### Install
 
 ```bash
-npx -y github:tomozard/agent-skills --yes   # skill layer + runtime layer + deep check
+npx -y github:tomozard/agent-skills health   # read-only: is this machine ready?
+npx -y github:tomozard/agent-skills --yes    # skill layer + runtime layer + deep check
 hteam check --deep
 hteam
 ```
